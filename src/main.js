@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { createSupermarketBagGeometry } from './bagGeometry.js';
 import { XPBDBagSolver } from './xpbdSolver.js';
+import { solidifyShell } from './solidify.js';
 
 /**
  * Generates a procedural fine HDPE extrusion-ripple bump texture
@@ -423,26 +424,44 @@ window.addEventListener('keydown', (e) => {
 
 // Binary STL Export (available when paused, scaled proportionally so X, Y, Z <= 24 cm / 240 mm)
 const stlExporter = new STLExporter();
+const sliderWall = document.getElementById('sliderWall');
+const valWall = document.getElementById('valWall');
+sliderWall.addEventListener('input', () => {
+  const t = parseFloat(sliderWall.value);
+  valWall.textContent = t > 0 ? `${t.toFixed(1)} mm` : 'sin grosor';
+});
+
 btnDownloadStl.addEventListener('click', () => {
   if (!paused || solver.isWarmingUp()) return;
-  const exportGeo = bagData.geometry.clone();
-  // Orient for 3D print build plate (Z-up)
-  exportGeo.rotateX(Math.PI / 2);
-  exportGeo.computeBoundingBox();
+  const MAX_MM = 240 * 0.9995; // tiny margin so float rounding never exceeds 240.0 mm
+  const wallMm = parseFloat(sliderWall.value);
 
+  // Orient for the 3D-print build plate (Z-up) and convert meters -> mm,
+  // reducing proportionally if any axis exceeds 240 mm (24 cm)
+  const shell = bagData.geometry.clone();
+  shell.rotateX(Math.PI / 2);
+  shell.computeBoundingBox();
   const size = new THREE.Vector3();
-  const center = new THREE.Vector3();
+  shell.boundingBox.getSize(size);
+  const scaleMm = Math.min(1000, MAX_MM / Math.max(size.x, size.y, size.z));
+  shell.scale(scaleMm, scaleMm, scaleMm);
+
+  // Give the film a real wall thickness so the STL is a closed, printable solid
+  let exportGeo = shell;
+  if (wallMm > 0) {
+    exportGeo = solidifyShell(shell.attributes.position.array, shell.index.array, wallMm);
+    shell.dispose();
+  }
+
+  // The wall adds a little size: fit again so no axis exceeds 240 mm, then center on the plate
+  exportGeo.computeBoundingBox();
   exportGeo.boundingBox.getSize(size);
+  const refit = Math.min(1, MAX_MM / Math.max(size.x, size.y, size.z));
+  if (refit < 1) exportGeo.scale(refit, refit, refit);
+  exportGeo.computeBoundingBox();
+  const center = new THREE.Vector3();
   exportGeo.boundingBox.getCenter(center);
-
-  // Convert meters -> mm, reducing proportionally if any axis exceeds 240 mm (24 cm).
-  // Tiny safety margin so float rounding can never push an axis above 240.0 mm.
-  const maxDimMeters = Math.max(size.x, size.y, size.z);
-  const maxAllowedMm = 240 * 0.9995;
-  const scaleMm = Math.min(1000, maxAllowedMm / maxDimMeters);
-
   exportGeo.translate(-center.x, -center.y, -exportGeo.boundingBox.min.z);
-  exportGeo.scale(scaleMm, scaleMm, scaleMm);
 
   const exportMesh = new THREE.Mesh(exportGeo);
   const stlBuffer = stlExporter.parse(exportMesh, { binary: true });
