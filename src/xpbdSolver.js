@@ -29,7 +29,14 @@ export class XPBDBagSolver {
       thickness: params.thickness ?? 0.0085,
       floorY: params.floorY ?? -0.06,
       substeps: params.substeps ?? 7,
+      // Steady wind: speed in m/s, direction it blows TOWARDS (azimuth in the floor plane, elevation
+      // above it) and turbulence 0..1 (gusts that vary in time and across the film)
+      windSpeed: params.windSpeed ?? 0,
+      windAzimuth: params.windAzimuth ?? 0,
+      windElevation: params.windElevation ?? 0,
+      windTurbulence: params.windTurbulence ?? 0.4,
     };
+    this.time = 0; // simulated seconds (drives the wind gusts)
 
     // Resolution normalisation (reference mesh: nx = 24, nv = 40).
     // Every vertex has unit mass, so with a finer mesh each vertex carries less film area:
@@ -284,8 +291,13 @@ export class XPBDBagSolver {
 
     // If a warm-up was already running, keep the user's original values
     if (!this.warmup) {
-      this.warmupSaved = { airDrag: this.params.airDrag, airPressure: this.params.airPressure };
+      this.warmupSaved = {
+        airDrag: this.params.airDrag,
+        airPressure: this.params.airPressure,
+        windSpeed: this.params.windSpeed,
+      };
     }
+    this.params.windSpeed = 0; // the reference pose always forms in still air
     this.params.airDrag = 0.72;
     this.params.airPressure = -0.06; // Slight deflation during crease formation
     this.warmup = { step: 0, total: steps };
@@ -348,7 +360,41 @@ export class XPBDBagSolver {
     this.extForces.fill(0);
     this.params.airDrag = this.warmupSaved.airDrag;
     this.params.airPressure = this.warmupSaved.airPressure;
+    this.params.windSpeed = this.warmupSaved.windSpeed;
     this.warmup = null;
+  }
+
+  /**
+   * Fixes or releases each handle. A handle that gets fixed is pinned where it is right now,
+   * so nothing jumps; a released handle becomes ordinary film.
+   */
+  setHandlePins(left, right) {
+    const apply = (indices, want) => {
+      for (const i of indices) {
+        if (want && !this.pinned[i]) {
+          this.pinned[i] = 1;
+          this.invMass[i] = 0;
+          for (let k = 0; k < 3; k++) {
+            this.pinTarget[3 * i + k] = this.pos[3 * i + k];
+            this.prevPos[3 * i + k] = this.pos[3 * i + k];
+          }
+        } else if (!want && this.pinned[i]) {
+          this.pinned[i] = 0;
+          this.invMass[i] = 1;
+        }
+        this.vel[3 * i] = this.vel[3 * i + 1] = this.vel[3 * i + 2] = 0;
+      }
+    };
+    apply(this.leftTipIndices, left);
+    apply(this.rightTipIndices, right);
+  }
+
+  /** Which handles are currently fixed. */
+  handlePins() {
+    return {
+      left: this.leftTipIndices.length > 0 && this.pinned[this.leftTipIndices[0]] === 1,
+      right: this.rightTipIndices.length > 0 && this.pinned[this.rightTipIndices[0]] === 1,
+    };
   }
 
   /**
@@ -391,6 +437,20 @@ export class XPBDBagSolver {
     const pressK = this.params.airPressure * 2.2 * this.aeroScale;
     const H = this.dimensions.H;
 
+    // Wind: pushes each triangle along its normal while the film moves slower than the air
+    // (saturating pressure model, so it never pumps energy into film already moving with the wind)
+    const P = this.params;
+    const windOn = P.windSpeed > 0.01 && P.airDrag >= 0;
+    const windK = 2000 * this.aeroScale; // ~10 m/s² on a panel facing a 5 m/s wind (any resolution)
+    const az = (P.windAzimuth * Math.PI) / 180;
+    const el = (P.windElevation * Math.PI) / 180;
+    // Azimuth 0° = towards +X (right), 90° = towards -Z (away from the default camera)
+    const wdx = Math.cos(el) * Math.cos(az), wdy = Math.sin(el), wdz = -Math.cos(el) * Math.sin(az);
+    // Horizontal perpendicular (for gusts that swing sideways)
+    const wpx = Math.sin(az), wpz = Math.cos(az);
+    const turb = Math.max(0, Math.min(1, P.windTurbulence));
+    const tm = this.time;
+
     for (let t = 0; t < this.numTris; t++) {
       const i0 = this.indices[3 * t];
       const i1 = this.indices[3 * t + 1];
@@ -418,7 +478,28 @@ export class XPBDBagSolver {
       // Gentle internal air puff mostly in the bag body (below handles)
       const avgY = (y0 + this.pos[3 * i1 + 1] + this.pos[3 * i2 + 1]) / 3;
       const bodyMask = Math.max(0, 1 - Math.pow(avgY / (H * 0.72), 2));
-      const fMag = (dragMag + pressK * area * bodyMask) / 3;
+      let windMag = 0;
+      if (windOn) {
+        const cx = (x0 * 3 + e1x + e2x) / 3, cy = avgY, cz = (z0 * 3 + e1z + e2z) / 3;
+        let gust = 1, swing = 0, lift = 0;
+        if (turb > 0) {
+          // Smooth gusts: slow overall surges + faster ripples that travel across the film
+          gust = 1 + turb * (0.45 * Math.sin(0.9 * tm + 0.3) + 0.35 * Math.sin(2.3 * tm + 7 * cx - 5 * cy) +
+            0.25 * Math.sin(5.1 * tm - 9 * cz + 6 * cy));
+          if (gust < 0) gust = 0;
+          swing = turb * 0.35 * Math.sin(0.7 * tm + 3 * cy + 1.1);
+          lift = turb * 0.25 * Math.sin(1.3 * tm + 4 * cx);
+        }
+        const sp = P.windSpeed * gust;
+        const wx = sp * (wdx + swing * wpx);
+        const wy = sp * (wdy + lift);
+        const wz = sp * (wdz + swing * wpz);
+        const wn = wx * nx + wy * ny + wz * nz;
+        const sgn = wn >= 0 ? 1 : -1;
+        const push = sgn * (wn - vn); // how much faster the air is than the film, along the normal
+        if (push > 0) windMag = sgn * windK * area * push * push;
+      }
+      const fMag = (dragMag + pressK * area * bodyMask + windMag) / 3;
 
       const fx = fMag * nx, fy = fMag * ny, fz = fMag * nz;
       aeroForces[3 * i0] += fx; aeroForces[3 * i0 + 1] += fy; aeroForces[3 * i0 + 2] += fz;
@@ -586,6 +667,8 @@ export class XPBDBagSolver {
         this.vel[iz] = vz;
       }
     }
+
+    this.time += dt;
 
     // 7. Elasto-Plastic Crease Memory Update (once per frame)
     if (this.params.plasticity > 0.001) {

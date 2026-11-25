@@ -98,6 +98,9 @@ export function buildPrintableSolid(wasm, P, idx, options = {}, progress = () =>
     const s = Math.min(1, maxMm / Math.max(...size));
     const moved = keep(solid.translate([-(bb.min[0] + bb.max[0]) / 2, -(bb.min[1] + bb.max[1]) / 2, -bb.min[2]]));
     solid = keep(moved.scale(s));
+    // Collapse sub-0.01 mm slivers left by the union: in float32 they would turn into coincident
+    // vertices that slicers weld into non-manifold edges
+    solid = keep(solid.simplify(0.01));
 
     const mesh = solid.getMesh();
     const np = mesh.numProp;
@@ -108,6 +111,7 @@ export function buildPrintableSolid(wasm, P, idx, options = {}, progress = () =>
       positions[3 * i + 1] = mesh.vertProperties[np * i + 1];
       positions[3 * i + 2] = mesh.vertProperties[np * i + 2];
     }
+    info.separatedTouchPoints = separateTouchingVertices(positions, mesh.triVerts, 0.01);
     const fb = solid.boundingBox();
     info.sizeMm = [0, 1, 2].map((k) => fb.max[k] - fb.min[k]);
     info.volumeCm3 = solid.volume() / 1000;
@@ -117,6 +121,47 @@ export function buildPrintableSolid(wasm, P, idx, options = {}, progress = () =>
   } finally {
     for (const m of garbage) m.delete();
   }
+}
+
+/**
+ * Where two parts of the film just touch, Manifold keeps two separate vertices at exactly the same
+ * point (valid for Manifold, which works with indices). An STL only stores coordinates, so a slicer
+ * would weld them into a non-manifold edge shared by four triangles. Moving each copy a hair
+ * inward along its own normal separates the two parts without visibly changing the model.
+ * Returns how many vertices were moved.
+ */
+function separateTouchingVertices(positions, triVerts, dist) {
+  const nv = positions.length / 3;
+  const groups = new Map();
+  let shared = null;
+  for (let v = 0; v < nv; v++) {
+    const k = `${positions[3 * v]},${positions[3 * v + 1]},${positions[3 * v + 2]}`;
+    const prev = groups.get(k);
+    if (prev === undefined) groups.set(k, v);
+    else (shared ??= new Set()).add(prev).add(v);
+  }
+  if (!shared) return 0;
+
+  // Area-weighted vertex normals (only needed for the shared vertices)
+  const n = new Float64Array(3 * nv);
+  for (let t = 0; t < triVerts.length; t += 3) {
+    const a = triVerts[t], b = triVerts[t + 1], c = triVerts[t + 2];
+    if (!shared.has(a) && !shared.has(b) && !shared.has(c)) continue;
+    const ux = positions[3 * b] - positions[3 * a], uy = positions[3 * b + 1] - positions[3 * a + 1], uz = positions[3 * b + 2] - positions[3 * a + 2];
+    const vx = positions[3 * c] - positions[3 * a], vy = positions[3 * c + 1] - positions[3 * a + 1], vz = positions[3 * c + 2] - positions[3 * a + 2];
+    const fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx;
+    for (const v of [a, b, c]) {
+      n[3 * v] += fx; n[3 * v + 1] += fy; n[3 * v + 2] += fz;
+    }
+  }
+  let moved = 0;
+  for (const v of shared) {
+    const l = Math.hypot(n[3 * v], n[3 * v + 1], n[3 * v + 2]);
+    if (l === 0) continue;
+    for (let k = 0; k < 3; k++) positions[3 * v + k] -= (n[3 * v + k] / l) * dist;
+    moved++;
+  }
+  return moved;
 }
 
 /**

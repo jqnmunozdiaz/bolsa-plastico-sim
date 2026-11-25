@@ -184,6 +184,7 @@
       grid-template-columns: repeat(3, 1fr);
       gap: 4px;
     }
+    .seg.seg-4 { grid-template-columns: repeat(4, 1fr); }
     .seg button {
       background: #ffffff;
       border: 1px solid rgba(148, 163, 184, 0.35);
@@ -260,6 +261,48 @@
             <input type="range" id="sliderTime" min="0" max="0" step="1" value="0" disabled />
           </div>
           <div class="param-desc">Guarda los últimos segundos de la simulación. <b>Arrástrala</b> para pausar y volver atrás; al <b>reanudar</b> se continúa desde ese instante y se descarta lo que venía después.</div>
+        </div>
+
+        <div class="control-row">
+          <div class="control-main">
+            <div class="control-label"><span>Asas Fijas</span></div>
+            <div class="seg seg-4" id="handleSeg">
+              <button type="button" data-handles="both" class="active">Ambas</button>
+              <button type="button" data-handles="left">Izquierda</button>
+              <button type="button" data-handles="right">Derecha</button>
+              <button type="button" data-handles="none">Ninguna</button>
+            </div>
+          </div>
+          <div class="param-desc">Qué asas quedan sujetas en el aire. Con <b>una sola</b>, la otra se suelta y pasa a ser parte de la simulación (cae, se balancea y se puede arrastrar). Con <b>ninguna</b>, la bolsa cae al suelo. Un asa que se vuelve a fijar queda sujeta donde esté en ese momento.</div>
+        </div>
+
+        <div class="control-row">
+          <div class="control-main">
+            <div class="control-label"><span>Viento</span><span id="valWind">Sin viento</span></div>
+            <input type="range" id="sliderWind" min="0" max="15" step="0.5" value="0" />
+          </div>
+          <div class="param-desc">Velocidad del viento constante. <b>2–4 m/s</b> = brisa que mece la bolsa; <b>8–15 m/s</b> = viento fuerte que la levanta y la hace flamear. La flecha azul muestra hacia dónde sopla.</div>
+        </div>
+        <div class="control-row">
+          <div class="control-main">
+            <div class="control-label"><span>Dirección del Viento</span><span id="valWindDir">0°</span></div>
+            <input type="range" id="sliderWindDir" min="0" max="355" step="5" value="0" />
+          </div>
+          <div class="param-desc">Hacia dónde sopla, visto desde la cámara inicial: <b>0°</b> = hacia la derecha, <b>90°</b> = hacia el fondo, <b>180°</b> = hacia la izquierda, <b>270°</b> = hacia la cámara.</div>
+        </div>
+        <div class="control-row">
+          <div class="control-main">
+            <div class="control-label"><span>Inclinación del Viento</span><span id="valWindElev">0°</span></div>
+            <input type="range" id="sliderWindElev" min="-60" max="60" step="5" value="0" />
+          </div>
+          <div class="param-desc">Ángulo respecto al suelo. <b>Positivo</b> = sopla hacia arriba y levanta la bolsa; <b>negativo</b> = sopla hacia abajo y la aplasta.</div>
+        </div>
+        <div class="control-row">
+          <div class="control-main">
+            <div class="control-label"><span>Ráfagas (Turbulencia)</span><span id="valWindTurb">0.40</span></div>
+            <input type="range" id="sliderWindTurb" min="0" max="1" step="0.05" value="0.4" />
+          </div>
+          <div class="param-desc">Cuánto varía el viento. <b>0</b> = flujo constante (la bolsa se queda quieta inclinada); <b>alto</b> = ráfagas que cambian de fuerza y dirección y hacen flamear el plástico.</div>
         </div>
 
         <div class="stl-note">El STL se exporta como sólido cerrado y reparado (sin auto-intersecciones), con Z hacia arriba y reducido proporcionalmente para que ningún eje (X, Y, Z) supere <b>24 cm</b> en la placa.</div>

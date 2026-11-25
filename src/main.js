@@ -179,6 +179,10 @@ function readUiParams() {
     plasticity: num('sliderPlastic'),
     airDrag: num('sliderDrag'),
     airPressure: num('sliderPressure'),
+    windSpeed: num('sliderWind'),
+    windAzimuth: num('sliderWindDir'),
+    windElevation: num('sliderWindElev'),
+    windTurbulence: num('sliderWindTurb'),
     selfCollision: document.getElementById('chkSelfCol').checked,
   };
 }
@@ -203,6 +207,7 @@ function buildBag(resKey) {
   wireMesh.geometry = bagData.geometry;
   oldGeometry.dispose();
   currentRes = resKey;
+  stlResult = '';
 
   history = new SimHistory(solver);
 
@@ -215,6 +220,7 @@ function buildBag(resKey) {
   for (const btn of document.querySelectorAll('#resSeg button')) {
     btn.classList.toggle('active', btn.dataset.res === resKey);
   }
+  setPaused(false); // a new mesh always starts simulating its reference pose
   refreshStatus();
 }
 
@@ -378,6 +384,7 @@ document.getElementById('btnRefPose').addEventListener('click', () => {
   solver.beginReferencePose(170);
   resetHistory();
   syncGeometry();
+  setPaused(false);
   refreshStatus();
 });
 document.getElementById('btnCrumple').addEventListener('click', () => {
@@ -389,6 +396,11 @@ document.getElementById('btnShake').addEventListener('click', () => {
 document.getElementById('btnFlat').addEventListener('click', () => {
   endBagDrag();
   solver.resetFlat();
+  applyHandleMode();
+  // A reset starts a new timeline (otherwise it would be labelled with the old run's time)
+  resetHistory();
+  history.record(simTime);
+  refreshTimeline();
   syncGeometry();
   refreshStatus();
 });
@@ -454,6 +466,7 @@ sliderTime.addEventListener('input', () => {
   endBagDrag();
   viewIndex = parseInt(sliderTime.value, 10);
   history.restore(viewIndex);
+  showHandleMode(solver.handlePins()); // the selector follows the frame being viewed
   syncGeometry();
   refreshTimeline();
 });
@@ -646,6 +659,84 @@ document.getElementById('chkWireframe').addEventListener('change', (e) => {
   wireMesh.visible = e.target.checked;
 });
 
+// ---- Fixed handles: both, only one, or none ----
+const HANDLE_MODES = {
+  both: { left: true, right: true },
+  left: { left: true, right: false },
+  right: { left: false, right: true },
+  none: { left: false, right: false },
+};
+let handleMode = 'both';
+
+function showHandleMode(pins) {
+  handleMode = Object.keys(HANDLE_MODES).find(
+    (k) => HANDLE_MODES[k].left === pins.left && HANDLE_MODES[k].right === pins.right
+  );
+  for (const btn of document.querySelectorAll('#handleSeg button')) {
+    btn.classList.toggle('active', btn.dataset.handles === handleMode);
+  }
+}
+
+/** Applies the selected mode (the reference-pose warm-up always holds both; it is applied when it ends). */
+function applyHandleMode() {
+  if (solver.isWarmingUp()) return;
+  const m = HANDLE_MODES[handleMode];
+  solver.setHandlePins(m.left, m.right);
+}
+
+document.getElementById('handleSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-handles]');
+  if (!btn) return;
+  endBagDrag();
+  showHandleMode(HANDLE_MODES[btn.dataset.handles]);
+  applyHandleMode();
+});
+
+// ---- Wind ----
+const sliderWind = document.getElementById('sliderWind');
+const sliderWindDir = document.getElementById('sliderWindDir');
+const sliderWindElev = document.getElementById('sliderWindElev');
+const sliderWindTurb = document.getElementById('sliderWindTurb');
+const DIR_NAMES = ['derecha', 'fondo-der.', 'fondo', 'fondo-izq.', 'izquierda', 'cámara-izq.', 'hacia cámara', 'cámara-der.'];
+
+// Arrow in the scene showing where the wind blows (as seen from the default camera)
+const windArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 0.1, 0x0ea5e9, 0.035, 0.022);
+windArrow.visible = false;
+scene.add(windArrow);
+
+function updateWindUi() {
+  const speed = parseFloat(sliderWind.value);
+  const az = parseFloat(sliderWindDir.value);
+  const el = parseFloat(sliderWindElev.value);
+  document.getElementById('valWind').textContent = speed > 0 ? `${speed.toFixed(1)} m/s` : 'Sin viento';
+  document.getElementById('valWindDir').textContent = `${az.toFixed(0)}° (${DIR_NAMES[Math.round(az / 45) % 8]})`;
+  document.getElementById('valWindElev').textContent = `${el > 0 ? '+' : ''}${el.toFixed(0)}°`;
+  document.getElementById('valWindTurb').textContent = parseFloat(sliderWindTurb.value).toFixed(2);
+
+  const a = (az * Math.PI) / 180;
+  const e = (el * Math.PI) / 180;
+  const dir = new THREE.Vector3(Math.cos(e) * Math.cos(a), Math.sin(e), -Math.cos(e) * Math.sin(a));
+  const len = 0.08 + speed * 0.012;
+  // Placed upwind of the bag, pointing at it
+  windArrow.position.set(0, 0.3, 0).addScaledVector(dir, -(0.3 + len));
+  windArrow.setDirection(dir);
+  windArrow.setLength(len, 0.035, 0.022);
+  windArrow.visible = speed > 0;
+}
+
+for (const [el, key] of [
+  [sliderWind, 'windSpeed'],
+  [sliderWindDir, 'windAzimuth'],
+  [sliderWindElev, 'windElevation'],
+  [sliderWindTurb, 'windTurbulence'],
+]) {
+  el.addEventListener('input', () => {
+    solver.setParam(key, parseFloat(el.value));
+    updateWindUi();
+  });
+}
+updateWindUi();
+
 // Mesh resolution selector (vertex counts computed from the actual generator)
 for (const [key, res] of Object.entries(RESOLUTIONS)) {
   const probe = createSupermarketBagGeometry({ ...BAG_SHAPE, nx: res.nx, ng: res.ng, nv: res.nv });
@@ -668,8 +759,14 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-function animate() {
+const PHYS_DT = 1 / 60;
+let lastFrameTime = performance.now();
+let stepClock = 0; // real seconds owed to the physics
+
+function animate(now = performance.now()) {
   requestAnimationFrame(animate);
+  const elapsed = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000));
+  lastFrameTime = now;
 
   if (!paused) {
     if (solver.isWarmingUp()) {
@@ -680,20 +777,27 @@ function animate() {
       } while (solver.isWarmingUp() && performance.now() - t0 < 28);
       syncGeometry();
       if (!solver.isWarmingUp()) {
-        // Pose ready: the timeline starts here
+        // Pose ready: apply the chosen fixed handles; the timeline starts here
+        applyHandleMode();
         resetHistory();
         history.record(simTime);
         refreshTimeline();
       }
       refreshStatus();
     } else {
-      const dt = (1 / 60) * simSpeed;
-      solver.step(dt);
-      simTime += dt;
-      syncGeometry();
-      if (++frameCounter % 2 === 0) {
-        history.record(simTime);
-        refreshTimeline();
+      // One 1/60 s physics step per 1/60 s of real time, so the bag moves at the same pace on
+      // 60, 120 or 144 Hz screens (at most one step per frame: slow meshes run in slow motion)
+      stepClock = Math.min(stepClock + elapsed, 2 * PHYS_DT);
+      if (stepClock >= PHYS_DT - 0.002) {
+        stepClock = Math.max(0, stepClock - PHYS_DT);
+        const dt = PHYS_DT * simSpeed;
+        solver.step(dt);
+        simTime += dt;
+        syncGeometry();
+        if (++frameCounter % 2 === 0) {
+          history.record(simTime);
+          refreshTimeline();
+        }
       }
     }
   }

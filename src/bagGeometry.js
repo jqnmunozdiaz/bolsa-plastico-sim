@@ -152,6 +152,14 @@ export function createSupermarketBagGeometry(options = {}) {
     for (let iu = 0; iu < NU; iu++) {
       if (!needed[iv][iu]) continue;
 
+      // Rows above a column's (fractional) rim height would all be clamped to the same point:
+      // reuse the vertex below instead of stacking duplicates (zero-length edges, flat triangles).
+      // Must run before the top-row weld, which would otherwise tie the back rim to the front rim.
+      if (iv > 0 && iv - 1 >= colTopRow[iu] - 0.25 && gridIdx[iv - 1][iu] !== -1) {
+        gridIdx[iv][iu] = gridIdx[iv - 1][iu];
+        continue;
+      }
+
       if (iv === 0 && iu > nx + ng && iu < 2 * nx + ng) {
         const frontIu = 2 * nx + ng - iu;
         if (gridIdx[0][frontIu] !== -1) {
