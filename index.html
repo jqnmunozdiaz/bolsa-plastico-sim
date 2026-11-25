@@ -254,14 +254,29 @@
           <button class="action-btn" id="btnDownloadStl" disabled title="Pausa la simulación (Espacio) para descargar el STL">Descargar STL</button>
         </div>
 
-        <div class="stl-note">El STL se exporta con Z hacia arriba y se reduce proporcionalmente para que ningún eje (X, Y, Z) supere <b>24 cm</b> en la placa de impresión.</div>
+        <div class="control-row">
+          <div class="control-main">
+            <div class="control-label"><span>Línea de Tiempo</span><span id="valTime">—</span></div>
+            <input type="range" id="sliderTime" min="0" max="0" step="1" value="0" disabled />
+          </div>
+          <div class="param-desc">Guarda los últimos segundos de la simulación. <b>Arrástrala</b> para pausar y volver atrás; al <b>reanudar</b> se continúa desde ese instante y se descarta lo que venía después.</div>
+        </div>
+
+        <div class="stl-note">El STL se exporta como sólido cerrado y reparado (sin auto-intersecciones), con Z hacia arriba y reducido proporcionalmente para que ningún eje (X, Y, Z) supere <b>24 cm</b> en la placa.</div>
 
         <div class="control-row">
           <div class="control-main">
             <div class="control-label"><span>Grosor de Pared STL</span><span id="valWall">1.2 mm</span></div>
-            <input type="range" id="sliderWall" min="0" max="3" step="0.2" value="1.2" />
+            <input type="range" id="sliderWall" min="0.8" max="3" step="0.2" value="1.2" />
           </div>
-          <div class="param-desc">Espesor real de la lámina en el STL, ya en la escala de impresión. Convierte la superficie en un sólido cerrado imprimible. <b>1,2 mm</b> ≈ 3 perímetros con boquilla de 0,4; <b>0</b> = solo superficie (no imprimible).</div>
+          <div class="param-desc">Espesor real de la lámina en el STL, ya a escala de impresión. <b>1,2 mm</b> ≈ 3 perímetros con boquilla de 0,4; el mínimo (0,8 mm = 2 perímetros) evita paredes que el laminador no puede imprimir.</div>
+        </div>
+        <div class="control-row check">
+          <div class="control-main">
+            <label for="chkBase">Base de Apoyo STL</label>
+            <input type="checkbox" id="chkBase" checked />
+          </div>
+          <div class="param-desc">Recorta unos mm del fondo redondeado y lo une a una placa plana de 2 mm. Sin base, la bolsa toca la cama en un solo punto y se despega o vuelca al imprimir.</div>
         </div>
 
         <div class="control-row">

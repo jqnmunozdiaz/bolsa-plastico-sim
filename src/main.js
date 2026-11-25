@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { createSupermarketBagGeometry } from './bagGeometry.js';
 import { XPBDBagSolver } from './xpbdSolver.js';
 import { solidifyShell } from './solidify.js';
+import { writeBinaryStl } from './printable.js';
+import { SimHistory } from './history.js';
+import StlWorker from './stlWorker.js?worker&inline';
 
 /**
  * Generates a procedural fine HDPE extrusion-ripple bump texture
@@ -126,6 +128,10 @@ let currentRes = 'low';
 let bagData = null;
 let solver = null;
 let posAttr = null;
+let history = null; // SimHistory for the timeline slider
+let simTime = 0; // simulated seconds since the reference pose finished
+let frameCounter = 0;
+let viewIndex = null; // timeline frame being viewed while scrubbing (null = live)
 
 const rippleBump = createFilmRippleTexture();
 
@@ -198,8 +204,11 @@ function buildBag(resKey) {
   oldGeometry.dispose();
   currentRes = resKey;
 
+  history = new SimHistory(solver);
+
   // Physical warm-up runs over the next frames so the page never freezes
   solver.beginReferencePose(170);
+  resetHistory();
   syncGeometry();
 
   document.getElementById('valRes').textContent = res.label;
@@ -367,6 +376,7 @@ btnWrinkleMode.addEventListener('click', () => {
 document.getElementById('btnRefPose').addEventListener('click', () => {
   endBagDrag();
   solver.beginReferencePose(170);
+  resetHistory();
   syncGeometry();
   refreshStatus();
 });
@@ -387,26 +397,79 @@ const btnPause = document.getElementById('btnPause');
 const btnDownloadStl = document.getElementById('btnDownloadStl');
 
 const statsBar = document.getElementById('statsBar');
+const sliderTime = document.getElementById('sliderTime');
+const valTime = document.getElementById('valTime');
+const sliderWall = document.getElementById('sliderWall');
+const valWall = document.getElementById('valWall');
+const chkBase = document.getElementById('chkBase');
+let stlBusy = false;
+let stlProgress = '';
+let stlResult = '';
 
 function refreshStatus() {
   const warming = solver.isWarmingUp();
-  const ready = paused && !warming;
+  const ready = paused && !stlBusy;
   btnDownloadStl.disabled = !ready;
   btnDownloadStl.classList.toggle('stl-ready', ready);
-  btnDownloadStl.title = warming
-    ? 'Espera a que termine la pose de referencia'
+  btnDownloadStl.textContent = stlBusy ? 'Generando STL…' : 'Descargar STL';
+  btnDownloadStl.title = stlBusy
+    ? 'Generando el sólido imprimible…'
     : paused
-      ? 'Descargar modelo 3D en STL (mm, máx. 24 cm por eje)'
+      ? 'Descargar sólido imprimible en STL (mm, máx. 24 cm por eje)'
       : 'Pausa la simulación (Espacio) para descargar el STL';
 
   const counts = `${bagData.numVertices.toLocaleString('es-ES')} vértices • ${bagData.numTriangles.toLocaleString('es-ES')} triángulos`;
-  statsBar.textContent = warming
-    ? `Generando pose de referencia… ${Math.round(solver.warmupProgress() * 100)} % • ${counts}`
-    : `${counts} • Arrastra para tirar • Espacio: Pausar • Órbita: Arrastrar fuera`;
+  const pct = Math.round(solver.warmupProgress() * 100);
+  if (stlBusy) statsBar.textContent = `Generando STL imprimible: ${stlProgress}`;
+  else if (warming) statsBar.textContent = paused
+    ? `Pose de referencia en pausa (${pct} %) • ${counts}`
+    : `Generando pose de referencia… ${pct} % • ${counts}`;
+  else if (paused) statsBar.textContent = `En pausa • ${stlResult || counts} • Espacio: Reanudar`;
+  else statsBar.textContent = `${counts} • Arrastra para tirar • Espacio: Pausar • Órbita: Arrastrar fuera`;
 }
 
+// ---- Timeline (history of the simulation) ----
+function resetHistory() {
+  history.clear();
+  simTime = 0;
+  frameCounter = 0;
+  viewIndex = null;
+  refreshTimeline();
+}
+
+function refreshTimeline() {
+  const n = history ? history.count : 0;
+  sliderTime.disabled = solver.isWarmingUp() || n < 2;
+  sliderTime.max = String(Math.max(0, n - 1));
+  const i = viewIndex ?? n - 1;
+  sliderTime.value = String(Math.max(0, i));
+  valTime.textContent = n === 0
+    ? '—'
+    : `${history.timeAt(i).toFixed(1)} / ${history.timeAt(n - 1).toFixed(1)} s`;
+}
+
+sliderTime.addEventListener('input', () => {
+  if (!history || history.count === 0 || solver.isWarmingUp()) return;
+  if (!paused) setPaused(true);
+  endBagDrag();
+  viewIndex = parseInt(sliderTime.value, 10);
+  history.restore(viewIndex);
+  syncGeometry();
+  refreshTimeline();
+});
+
 function setPaused(nextPaused) {
+  if (paused === nextPaused) return;
   paused = nextPaused;
+  if (!paused && viewIndex !== null) {
+    // Resume from the frame being viewed: everything after it is discarded (new branch)
+    history.truncateAfter(viewIndex);
+    simTime = history.timeAt(viewIndex);
+    viewIndex = null;
+    frameCounter = 0;
+    refreshTimeline();
+  }
+  if (!paused) stlResult = '';
   btnPause.textContent = paused ? 'Reanudar (Espacio)' : 'Pausar (Espacio)';
   refreshStatus();
 }
@@ -415,67 +478,142 @@ btnPause.addEventListener('click', () => {
   setPaused(!paused);
 });
 
+// Space toggles pause. A focused button/checkbox would also react to Space (on keyup) and undo
+// the toggle, so cancel that default and drop focus from buttons after mouse clicks.
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Space') {
-    e.preventDefault();
-    setPaused(!paused);
-  }
+  if (e.code !== 'Space') return;
+  e.preventDefault();
+  if (e.repeat) return;
+  setPaused(!paused);
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space') e.preventDefault();
+});
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('button, input[type="checkbox"]');
+  if (el) el.blur();
 });
 
-// Binary STL Export (available when paused, scaled proportionally so X, Y, Z <= 24 cm / 240 mm)
-const stlExporter = new STLExporter();
-const sliderWall = document.getElementById('sliderWall');
-const valWall = document.getElementById('valWall');
+// ---- Printable STL export (runs in a background worker with the Manifold geometry kernel) ----
+const MAX_MM = 240 * 0.9995; // tiny margin so float rounding never exceeds 240.0 mm
+let stlWorker = null;
+let stlJobId = 0;
+
 sliderWall.addEventListener('input', () => {
-  const t = parseFloat(sliderWall.value);
-  valWall.textContent = t > 0 ? `${t.toFixed(1)} mm` : 'sin grosor';
+  valWall.textContent = `${parseFloat(sliderWall.value).toFixed(1)} mm`;
 });
 
-btnDownloadStl.addEventListener('click', () => {
-  if (!paused || solver.isWarmingUp()) return;
-  const MAX_MM = 240 * 0.9995; // tiny margin so float rounding never exceeds 240.0 mm
-  const wallMm = parseFloat(sliderWall.value);
+function runStlWorker(positions, indices, options) {
+  if (!stlWorker) stlWorker = new StlWorker();
+  const id = ++stlJobId;
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      stlWorker.removeEventListener('message', onMessage);
+      stlWorker.removeEventListener('error', onError);
+    };
+    const onMessage = (e) => {
+      const d = e.data;
+      if (d.id !== id) return;
+      if (d.progress) {
+        stlProgress = d.progress;
+        refreshStatus();
+        return;
+      }
+      cleanup();
+      if (d.error) reject(new Error(d.error));
+      else resolve(d);
+    };
+    const onError = (e) => {
+      cleanup();
+      stlWorker.terminate();
+      stlWorker = null;
+      reject(new Error(e.message || 'Error en el worker de STL'));
+    };
+    stlWorker.addEventListener('message', onMessage);
+    stlWorker.addEventListener('error', onError);
+    stlWorker.postMessage(
+      { id, positions, indices, options },
+      [positions.buffer, indices.buffer]
+    );
+  });
+}
 
-  // Orient for the 3D-print build plate (Z-up) and convert meters -> mm,
-  // reducing proportionally if any axis exceeds 240 mm (24 cm)
-  const shell = bagData.geometry.clone();
-  shell.rotateX(Math.PI / 2);
-  shell.computeBoundingBox();
-  const size = new THREE.Vector3();
-  shell.boundingBox.getSize(size);
-  const scaleMm = Math.min(1000, MAX_MM / Math.max(size.x, size.y, size.z));
-  shell.scale(scaleMm, scaleMm, scaleMm);
-
-  // Give the film a real wall thickness so the STL is a closed, printable solid
-  let exportGeo = shell;
-  if (wallMm > 0) {
-    exportGeo = solidifyShell(shell.attributes.position.array, shell.index.array, wallMm);
-    shell.dispose();
+/** Fallback if the repair kernel fails: plain solidify, fit to MAX_MM, center on the plate. */
+function simpleSolidStl(P, indices, wallMm) {
+  const geo = solidifyShell(P, indices, wallMm);
+  const pos = geo.attributes.position.array;
+  const mn = [Infinity, Infinity, Infinity];
+  const mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pos.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      mn[k] = Math.min(mn[k], pos[i + k]);
+      mx[k] = Math.max(mx[k], pos[i + k]);
+    }
   }
+  const s = Math.min(1, MAX_MM / Math.max(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]));
+  const shift = [-(mn[0] + mx[0]) / 2, -(mn[1] + mx[1]) / 2, -mn[2]];
+  for (let i = 0; i < pos.length; i += 3) {
+    for (let k = 0; k < 3; k++) pos[i + k] = (pos[i + k] + shift[k]) * s;
+  }
+  const stl = writeBinaryStl(pos, geo.index.array);
+  geo.dispose();
+  return stl;
+}
 
-  // The wall adds a little size: fit again so no axis exceeds 240 mm, then center on the plate
-  exportGeo.computeBoundingBox();
-  exportGeo.boundingBox.getSize(size);
-  const refit = Math.min(1, MAX_MM / Math.max(size.x, size.y, size.z));
-  if (refit < 1) exportGeo.scale(refit, refit, refit);
-  exportGeo.computeBoundingBox();
-  const center = new THREE.Vector3();
-  exportGeo.boundingBox.getCenter(center);
-  exportGeo.translate(-center.x, -center.y, -exportGeo.boundingBox.min.z);
-
-  const exportMesh = new THREE.Mesh(exportGeo);
-  const stlBuffer = stlExporter.parse(exportMesh, { binary: true });
-  exportGeo.dispose();
-
-  const blob = new Blob([stlBuffer], { type: 'application/octet-stream' });
+function downloadBuffer(buffer, filename) {
+  const blob = new Blob([buffer], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `bolsa-supermercado-${currentRes}.stl`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+btnDownloadStl.addEventListener('click', async () => {
+  if (!paused || stlBusy) return;
+  stlBusy = true;
+  stlProgress = 'preparando…';
+  refreshStatus();
+
+  // Orient for the build plate (Z-up: rotate +90° about X) and convert meters -> mm,
+  // scaled so no axis exceeds 240 mm. The worker fits again after adding wall and base.
+  const N = bagData.numVertices;
+  const P = new Float32Array(3 * N);
+  const mn = [Infinity, Infinity, Infinity];
+  const mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < N; i++) {
+    P[3 * i] = solver.pos[3 * i];
+    P[3 * i + 1] = -solver.pos[3 * i + 2];
+    P[3 * i + 2] = solver.pos[3 * i + 1];
+    for (let k = 0; k < 3; k++) {
+      mn[k] = Math.min(mn[k], P[3 * i + k]);
+      mx[k] = Math.max(mx[k], P[3 * i + k]);
+    }
+  }
+  const scaleMm = Math.min(1000, MAX_MM / Math.max(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]));
+  for (let i = 0; i < P.length; i++) P[i] *= scaleMm;
+
+  const wallMm = parseFloat(sliderWall.value);
+  const filename = `bolsa-supermercado-${currentRes}.stl`;
+  try {
+    const { stl, info } = await runStlWorker(
+      P.slice(),
+      new Uint32Array(bagData.indices),
+      { wall: wallMm, base: chkBase.checked, maxMm: MAX_MM }
+    );
+    downloadBuffer(stl, filename);
+    stlResult = `STL ${info.sizeMm.map((v) => v.toFixed(0)).join(' × ')} mm, ${info.volumeCm3.toFixed(0)} cm³, sin errores`;
+  } catch (err) {
+    console.warn('No se pudo reparar el STL; se exporta el sólido simple.', err);
+    downloadBuffer(simpleSolidStl(P, new Uint32Array(bagData.indices), wallMm), filename);
+    stlResult = 'STL sin reparar (falló el motor de reparación)';
+  } finally {
+    stlBusy = false;
+    refreshStatus();
+  }
 });
 
 const sliderSpeed = document.getElementById('sliderSpeed');
@@ -533,17 +671,31 @@ window.addEventListener('resize', () => {
 function animate() {
   requestAnimationFrame(animate);
 
-  if (solver.isWarmingUp()) {
-    // Spread the reference-pose warm-up over frames (~28 ms of physics per frame)
-    const t0 = performance.now();
-    do {
-      solver.advanceReferencePose(1);
-    } while (solver.isWarmingUp() && performance.now() - t0 < 28);
-    syncGeometry();
-    refreshStatus();
-  } else if (!paused) {
-    solver.step((1 / 60) * simSpeed);
-    syncGeometry();
+  if (!paused) {
+    if (solver.isWarmingUp()) {
+      // Spread the reference-pose warm-up over frames (~28 ms of physics per frame)
+      const t0 = performance.now();
+      do {
+        solver.advanceReferencePose(1);
+      } while (solver.isWarmingUp() && performance.now() - t0 < 28);
+      syncGeometry();
+      if (!solver.isWarmingUp()) {
+        // Pose ready: the timeline starts here
+        resetHistory();
+        history.record(simTime);
+        refreshTimeline();
+      }
+      refreshStatus();
+    } else {
+      const dt = (1 / 60) * simSpeed;
+      solver.step(dt);
+      simTime += dt;
+      syncGeometry();
+      if (++frameCounter % 2 === 0) {
+        history.record(simTime);
+        refreshTimeline();
+      }
+    }
   }
 
   controls.update();
