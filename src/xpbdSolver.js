@@ -1,0 +1,704 @@
+/**
+ * XPBD (Extended Position Based Dynamics) Thin-Shell Plastic Film Solver
+ *
+ * Models an HDPE supermarket bag with:
+ * - Near-inextensible membrane stretch/shear constraints
+ * - Signed dihedral bending constraints with elasto-plastic crease memory
+ * - Triangle aerodynamic drag & subtle internal air cushion
+ * - Fast spatial-hash self-collision + floor collision
+ */
+export class XPBDBagSolver {
+  constructor(bagMeshData, params = {}) {
+    this.numVerts = bagMeshData.numVertices;
+    this.numTris = bagMeshData.numTriangles;
+    this.indices = bagMeshData.indices;
+    this.leftTipIndices = bagMeshData.leftTipIndices;
+    this.rightTipIndices = bagMeshData.rightTipIndices;
+    this.gussetIndices = bagMeshData.gussetIndices;
+    this.dimensions = bagMeshData.dimensions;
+
+    // Physics parameters
+    this.params = {
+      gravity: params.gravity ?? 9.8,
+      stretchCompliance: params.stretchCompliance ?? 2e-6,
+      bendingCompliance: params.bendingCompliance ?? 0.22, // mapped to XPBD alpha
+      plasticity: params.plasticity ?? 0.68,
+      airDrag: params.airDrag ?? 0.55,
+      airPressure: params.airPressure ?? 0.18,
+      selfCollision: params.selfCollision ?? true,
+      thickness: params.thickness ?? 0.0085,
+      floorY: params.floorY ?? -0.06,
+      substeps: params.substeps ?? 7,
+    };
+
+    const N = this.numVerts;
+    this.restPos = new Float32Array(bagMeshData.positions);
+    this.pos = new Float32Array(bagMeshData.positions);
+    this.prevPos = new Float32Array(bagMeshData.positions);
+    this.vel = new Float32Array(N * 3);
+    this.invMass = new Float32Array(N);
+    this.pinned = new Uint8Array(N);
+    this.pinTarget = new Float32Array(N * 3);
+
+    // Uniform light mass (approx 8g bag -> 1.0 normalized unit per vertex)
+    this.invMass.fill(1.0);
+
+    // Precompute stretch edges & rest lengths
+    const edges = bagMeshData.stretchEdges;
+    this.numStretch = edges.length;
+    this.stretchA = new Int32Array(this.numStretch);
+    this.stretchB = new Int32Array(this.numStretch);
+    this.stretchRestLen = new Float32Array(this.numStretch);
+
+    for (let i = 0; i < this.numStretch; i++) {
+      const a = edges[i][0];
+      const b = edges[i][1];
+      this.stretchA[i] = a;
+      this.stretchB[i] = b;
+      const dx = this.restPos[3 * b] - this.restPos[3 * a];
+      const dy = this.restPos[3 * b + 1] - this.restPos[3 * a + 1];
+      const dz = this.restPos[3 * b + 2] - this.restPos[3 * a + 2];
+      this.stretchRestLen[i] = Math.hypot(dx, dy, dz);
+    }
+
+    // Precompute dihedral bending hinges & rest angles
+    const hinges = bagMeshData.bendingHinges;
+    this.numBending = hinges.length;
+    this.bendI0 = new Int32Array(this.numBending);
+    this.bendI1 = new Int32Array(this.numBending);
+    this.bendI2 = new Int32Array(this.numBending);
+    this.bendI3 = new Int32Array(this.numBending);
+    this.bendRestAngle = new Float32Array(this.numBending);
+    this.bendInitialAngle = new Float32Array(this.numBending);
+
+    for (let i = 0; i < this.numBending; i++) {
+      const [i0, i1, i2, i3] = hinges[i];
+      this.bendI0[i] = i0;
+      this.bendI1[i] = i1;
+      this.bendI2[i] = i2;
+      this.bendI3[i] = i3;
+      const ang = this._computeDihedralAngle(this.restPos, i0, i1, i2, i3);
+      this.bendRestAngle[i] = ang;
+      this.bendInitialAngle[i] = ang;
+    }
+
+    // Build 1-ring + 2-ring adjacency sets for self-collision exclusion
+    const adj1 = Array.from({ length: N }, () => new Set());
+    for (let i = 0; i < this.numStretch; i++) {
+      adj1[this.stretchA[i]].add(this.stretchB[i]);
+      adj1[this.stretchB[i]].add(this.stretchA[i]);
+    }
+    this.excludeNeighbors = Array.from({ length: N }, (_, i) => {
+      const s = new Set(adj1[i]);
+      s.add(i);
+      for (const n1 of adj1[i]) {
+        for (const n2 of adj1[n1]) {
+          s.add(n2);
+        }
+      }
+      return s;
+    });
+
+    // Spatial hash buffers (zero-allocation per step)
+    this.hashSize = 8192;
+    this.cellStart = new Int32Array(this.hashSize + 1);
+    this.cellEntries = new Int32Array(N);
+    this.vertCellHash = new Int32Array(N);
+
+    // Interactive mouse drag / wrinkle brush state
+    this.dragVertex = -1;
+    this.dragTarget = [0, 0, 0];
+    this.dragPatch = []; // [{ idx, weight, ox, oy, oz }]
+    this.dragHandleGroup = null; // 'left' | 'right' | null
+    this.dragHandleStart = [0, 0, 0];
+    this.dragPinStarts = []; // [{ idx, x, y, z }]
+    this.wrinkleMode = false;
+
+    // Temporary external sculpt/gust forces (used for reference pose warm-up or air gusts)
+    this.extForces = new Float32Array(N * 3);
+  }
+
+  _computeDihedralAngle(p, i0, i1, i2, i3) {
+    const p0x = p[3 * i0], p0y = p[3 * i0 + 1], p0z = p[3 * i0 + 2];
+    const ex = p[3 * i1] - p0x, ey = p[3 * i1 + 1] - p0y, ez = p[3 * i1 + 2] - p0z;
+    const eLen = Math.hypot(ex, ey, ez);
+    if (eLen < 1e-7) return 0;
+
+    const a2x = p[3 * i2] - p0x, a2y = p[3 * i2 + 1] - p0y, a2z = p[3 * i2 + 2] - p0z;
+    const a3x = p[3 * i3] - p0x, a3y = p[3 * i3 + 1] - p0y, a3z = p[3 * i3 + 2] - p0z;
+
+    // n1 = e x a2, n2 = a3 x e
+    let n1x = ey * a2z - ez * a2y;
+    let n1y = ez * a2x - ex * a2z;
+    let n1z = ex * a2y - ey * a2x;
+    const n1Len = Math.hypot(n1x, n1y, n1z);
+
+    let n2x = a3y * ez - a3z * ey;
+    let n2y = a3z * ex - a3x * ez;
+    let n2z = a3x * ey - a3y * ex;
+    const n2Len = Math.hypot(n2x, n2y, n2z);
+
+    if (n1Len < 1e-7 || n2Len < 1e-7) return 0;
+    n1x /= n1Len; n1y /= n1Len; n1z /= n1Len;
+    n2x /= n2Len; n2y /= n2Len; n2z /= n2Len;
+
+    const cosT = Math.max(-1, Math.min(1, n1x * n2x + n1y * n2y + n1z * n2z));
+    // Sign via (n1 x n2) . (e / eLen)
+    const cx = n1y * n2z - n1z * n2y;
+    const cy = n1z * n2x - n1x * n2z;
+    const cz = n1x * n2y - n1y * n2x;
+    const sinT = (cx * ex + cy * ey + cz * ez) / eLen;
+    return Math.atan2(sinT, cosT);
+  }
+
+  resetFlat() {
+    this.pos.set(this.restPos);
+    this.prevPos.set(this.restPos);
+    this.vel.fill(0);
+    this.extForces.fill(0);
+    this.bendRestAngle.set(this.bendInitialAngle);
+    this.clearPins();
+    this.pinHandles(
+      { x: -0.125, y: 0.56, z: 0.0 },
+      { x: 0.125, y: 0.56, z: 0.0 }
+    );
+  }
+
+  clearPins() {
+    this.pinned.fill(0);
+    this.invMass.fill(1.0);
+  }
+
+  pinHandles(leftOffset, rightOffset) {
+    // Compute centroids of left and right handle tips in rest space
+    const pinGroup = (indices, target) => {
+      if (indices.length === 0) return;
+      let cx = 0, cy = 0, cz = 0;
+      for (const idx of indices) {
+        cx += this.restPos[3 * idx];
+        cy += this.restPos[3 * idx + 1];
+        cz += this.restPos[3 * idx + 2];
+      }
+      cx /= indices.length;
+      cy /= indices.length;
+      cz /= indices.length;
+
+      for (const idx of indices) {
+        this.pinned[idx] = 1;
+        this.invMass[idx] = 0.0;
+        const dx = (this.restPos[3 * idx] - cx) * 0.45;
+        const dy = (this.restPos[3 * idx + 1] - cy) * 0.45;
+        const dz = (this.restPos[3 * idx + 2] - cz) * 0.45;
+        this.pinTarget[3 * idx] = target.x + dx;
+        this.pinTarget[3 * idx + 1] = target.y + dy;
+        this.pinTarget[3 * idx + 2] = target.z + dz;
+        this.pos[3 * idx] = this.pinTarget[3 * idx];
+        this.pos[3 * idx + 1] = this.pinTarget[3 * idx + 1];
+        this.pos[3 * idx + 2] = this.pinTarget[3 * idx + 2];
+        this.prevPos[3 * idx] = this.pinTarget[3 * idx];
+        this.prevPos[3 * idx + 1] = this.pinTarget[3 * idx + 1];
+        this.prevPos[3 * idx + 2] = this.pinTarget[3 * idx + 2];
+      }
+    };
+
+    pinGroup(this.leftTipIndices, leftOffset);
+    pinGroup(this.rightTipIndices, rightOffset);
+  }
+
+  /**
+   * Runs a physically-driven warm-up that suspends the bag with the left handle
+   * higher than the right handle and applies a temporary localized squeeze/tuck
+   * on the lower-right corner so plastic creases & diagonal tension folds form
+   * naturally before releasing into pure free-hanging equilibrium.
+   */
+  simulateReferencePose(steps = 170) {
+    this.pos.set(this.restPos);
+    this.prevPos.set(this.restPos);
+    this.vel.fill(0);
+    this.extForces.fill(0);
+    this.bendRestAngle.set(this.bendInitialAngle);
+    this.clearPins();
+
+    // Rotate 3/4 view angle (~26 deg) matching the reference photograph
+    const cosR = Math.cos(0.45);
+    const sinR = Math.sin(0.45);
+    for (let i = 0; i < this.numVerts; i++) {
+      const x = this.pos[3 * i];
+      const z = this.pos[3 * i + 2];
+      this.pos[3 * i] = x * cosR - z * sinR;
+      this.pos[3 * i + 2] = x * sinR + z * cosR;
+      this.pos[3 * i + 1] += 0.11; // Elevate so entire bag floats cleanly above floor shadow
+      this.prevPos[3 * i] = this.pos[3 * i];
+      this.prevPos[3 * i + 1] = this.pos[3 * i + 1];
+      this.prevPos[3 * i + 2] = this.pos[3 * i + 2];
+    }
+
+    // Pin handles suspended in mid-air: left handle tall & forward, right handle lower & back
+    this.pinHandles(
+      { x: -0.105, y: 0.61, z: 0.05 },
+      { x: 0.108, y: 0.495, z: -0.05 }
+    );
+
+    const dt = 1 / 60;
+    const savedDrag = this.params.airDrag;
+    const savedPress = this.params.airPressure;
+    this.params.airDrag = 0.72;
+    this.params.airPressure = -0.06; // Slight deflation during crease formation
+
+    for (let s = 0; s < steps; s++) {
+      this.extForces.fill(0);
+      if (s < steps * 0.72) {
+        const env = Math.sin((s / (steps * 0.72)) * Math.PI);
+        const strength = env * 30.0;
+        for (let i = 0; i < this.numVerts; i++) {
+          if (this.pinned[i]) continue;
+          const x = this.pos[3 * i];
+          const y = this.pos[3 * i + 1];
+          const z = this.pos[3 * i + 2];
+
+          // 1. Lower-right inward tuck & upward crumple pocket
+          if (x > 0.00 && y < 0.36) {
+            const wx = Math.min(1, x / 0.13);
+            const wy = Math.min(1, (0.36 - y) / 0.18);
+            const w = wx * wy;
+            this.extForces[3 * i] -= w * strength * 1.15;
+            this.extForces[3 * i + 1] += w * strength * 0.85;
+            this.extForces[3 * i + 2] -= w * strength * 0.75 * Math.sign(z || 1);
+          }
+
+          // 2. Crisp diagonal tension-fold buckling waves (upper-left mouth -> lower-right)
+          const diag = (x + 0.06) * 0.88 + (y - 0.36);
+          if (y > 0.13 && y < 0.46) {
+            const wave = Math.sin(diag * 68.0) + 0.45 * Math.sin(diag * 115.0 + 0.8);
+            this.extForces[3 * i + 2] += wave * strength * 0.65;
+          }
+        }
+      }
+      this.step(dt);
+    }
+
+    this.extForces.fill(0);
+    this.params.airDrag = savedDrag;
+    this.params.airPressure = savedPress;
+  }
+
+  /**
+   * Applies a random crumple impulse & temporary inward squeeze, then lets go.
+   */
+  triggerCrumpleImpulse() {
+    const cx = 0, cy = 0.22, cz = 0;
+    for (let i = 0; i < this.numVerts; i++) {
+      if (this.pinned[i]) continue;
+      const dx = cx - this.pos[3 * i];
+      const dy = cy - this.pos[3 * i + 1];
+      const dz = cz - this.pos[3 * i + 2];
+      const noise = (Math.sin(i * 12.9898) * 43758.5453) % 1;
+      this.vel[3 * i] += dx * 4.5 + (noise - 0.5) * 0.8;
+      this.vel[3 * i + 1] += dy * 3.5;
+      this.vel[3 * i + 2] += dz * 6.0 + Math.cos(i * 7.13) * 0.6;
+    }
+  }
+
+  triggerAirGust() {
+    for (let i = 0; i < this.numVerts; i++) {
+      if (this.pinned[i]) continue;
+      const y = this.pos[3 * i + 1];
+      const gust = (1.2 + 0.6 * Math.sin(y * 10.0));
+      this.vel[3 * i] += gust * 0.9;
+      this.vel[3 * i + 1] += 0.35;
+      this.vel[3 * i + 2] += (Math.sin(i * 3.7) * 0.5 + 0.4) * 0.8;
+    }
+  }
+
+  step(dt) {
+    const substeps = this.params.substeps;
+    const sdt = dt / substeps;
+    const N = this.numVerts;
+
+    // Precompute aerodynamic & pressure forces once per frame
+    const aeroForces = new Float32Array(N * 3);
+    const dragK = this.params.airDrag * 18.0;
+    const pressK = this.params.airPressure * 2.2;
+    const H = this.dimensions.H;
+
+    for (let t = 0; t < this.numTris; t++) {
+      const i0 = this.indices[3 * t];
+      const i1 = this.indices[3 * t + 1];
+      const i2 = this.indices[3 * t + 2];
+
+      const x0 = this.pos[3 * i0], y0 = this.pos[3 * i0 + 1], z0 = this.pos[3 * i0 + 2];
+      const e1x = this.pos[3 * i1] - x0, e1y = this.pos[3 * i1 + 1] - y0, e1z = this.pos[3 * i1 + 2] - z0;
+      const e2x = this.pos[3 * i2] - x0, e2y = this.pos[3 * i2 + 1] - y0, e2z = this.pos[3 * i2 + 2] - z0;
+
+      let nx = e1y * e2z - e1z * e2y;
+      let ny = e1z * e2x - e1x * e2z;
+      let nz = e1x * e2y - e1y * e2x;
+      const area2 = Math.hypot(nx, ny, nz);
+      if (area2 < 1e-9) continue;
+      const area = 0.5 * area2;
+      nx /= area2; ny /= area2; nz /= area2;
+
+      const vx = (this.vel[3 * i0] + this.vel[3 * i1] + this.vel[3 * i2]) / 3;
+      const vy = (this.vel[3 * i0 + 1] + this.vel[3 * i1 + 1] + this.vel[3 * i2 + 1]) / 3;
+      const vz = (this.vel[3 * i0 + 2] + this.vel[3 * i1 + 2] + this.vel[3 * i2 + 2]) / 3;
+
+      const vn = vx * nx + vy * ny + vz * nz;
+      const dragMag = -dragK * area * (vn * Math.abs(vn) + 0.25 * vn);
+
+      // Gentle internal air puff mostly in the bag body (below handles)
+      const avgY = (y0 + this.pos[3 * i1 + 1] + this.pos[3 * i2 + 1]) / 3;
+      const bodyMask = Math.max(0, 1 - Math.pow(avgY / (H * 0.72), 2));
+      const fMag = (dragMag + pressK * area * bodyMask) / 3;
+
+      const fx = fMag * nx, fy = fMag * ny, fz = fMag * nz;
+      aeroForces[3 * i0] += fx; aeroForces[3 * i0 + 1] += fy; aeroForces[3 * i0 + 2] += fz;
+      aeroForces[3 * i1] += fx; aeroForces[3 * i1 + 1] += fy; aeroForces[3 * i1 + 2] += fz;
+      aeroForces[3 * i2] += fx; aeroForces[3 * i2 + 1] += fy; aeroForces[3 * i2 + 2] += fz;
+    }
+
+    const g = -this.params.gravity;
+    const stretchAlpha = this.params.stretchCompliance / (sdt * sdt);
+    // Map UI bending slider [0.01..1.0] to XPBD compliance (lower slider = softer)
+    const bendStiff = Math.max(0.005, this.params.bendingCompliance);
+    const bendAlpha = (0.0008 / (bendStiff * bendStiff)) / (sdt * sdt);
+
+    for (let step = 0; step < substeps; step++) {
+      // 1. Integrate velocities & predict positions
+      for (let i = 0; i < N; i++) {
+        if (this.pinned[i]) {
+          this.pos[3 * i] = this.pinTarget[3 * i];
+          this.pos[3 * i + 1] = this.pinTarget[3 * i + 1];
+          this.pos[3 * i + 2] = this.pinTarget[3 * i + 2];
+          this.prevPos[3 * i] = this.pinTarget[3 * i];
+          this.prevPos[3 * i + 1] = this.pinTarget[3 * i + 1];
+          this.prevPos[3 * i + 2] = this.pinTarget[3 * i + 2];
+          continue;
+        }
+
+        const ix = 3 * i, iy = ix + 1, iz = ix + 2;
+        this.prevPos[ix] = this.pos[ix];
+        this.prevPos[iy] = this.pos[iy];
+        this.prevPos[iz] = this.pos[iz];
+
+        const im = this.invMass[i];
+        this.vel[ix] += (aeroForces[ix] + this.extForces[ix]) * im * sdt;
+        this.vel[iy] += (g + (aeroForces[iy] + this.extForces[iy]) * im) * sdt;
+        this.vel[iz] += (aeroForces[iz] + this.extForces[iz]) * im * sdt;
+
+        // Subtle velocity damping for numerical stability
+        this.vel[ix] *= 0.996;
+        this.vel[iy] *= 0.996;
+        this.vel[iz] *= 0.996;
+
+        this.pos[ix] += this.vel[ix] * sdt;
+        this.pos[iy] += this.vel[iy] * sdt;
+        this.pos[iz] += this.vel[iz] * sdt;
+      }
+
+      // Interactive handle-tip dragging (moves the suspended handle pin)
+      if (this.dragHandleGroup) {
+        const dx = this.dragTarget[0] - this.dragHandleStart[0];
+        const dy = this.dragTarget[1] - this.dragHandleStart[1];
+        const dz = this.dragTarget[2] - this.dragHandleStart[2];
+        for (let k = 0; k < this.dragPinStarts.length; k++) {
+          const item = this.dragPinStarts[k];
+          this.pinTarget[3 * item.idx] = item.x + dx;
+          this.pinTarget[3 * item.idx + 1] = item.y + dy;
+          this.pinTarget[3 * item.idx + 2] = item.z + dz;
+        }
+      }
+
+      // Interactive mouse drag / soft-radius pinch-wrinkle
+      if (this.dragVertex >= 0) {
+        for (let k = 0; k < this.dragPatch.length; k++) {
+          const { idx, weight, ox, oy, oz } = this.dragPatch[k];
+          if (this.pinned[idx]) continue;
+          const pIdx = 3 * idx;
+          if (this.wrinkleMode) {
+            const px = this.dragTarget[0] - this.pos[pIdx];
+            const py = this.dragTarget[1] - this.pos[pIdx + 1];
+            const pz = this.dragTarget[2] - this.pos[pIdx + 2];
+            const jitter = Math.sin(idx * 19.37) * 0.003;
+            this.pos[pIdx] += px * 0.35 * weight;
+            this.pos[pIdx + 1] += py * 0.35 * weight;
+            this.pos[pIdx + 2] += (pz * 0.35 + jitter) * weight;
+          } else {
+            // Pull patch toward dragTarget + its initial offset so the bag follows the cursor cleanly
+            const tx = this.dragTarget[0] + ox;
+            const ty = this.dragTarget[1] + oy;
+            const tz = this.dragTarget[2] + oz;
+            const pull = 0.78 * weight;
+            this.pos[pIdx] += (tx - this.pos[pIdx]) * pull;
+            this.pos[pIdx + 1] += (ty - this.pos[pIdx + 1]) * pull;
+            this.pos[pIdx + 2] += (tz - this.pos[pIdx + 2]) * pull;
+          }
+        }
+      }
+
+      // 2. Solve Stretch Constraints
+      for (let c = 0; c < this.numStretch; c++) {
+        const a = this.stretchA[c];
+        const b = this.stretchB[c];
+        const w1 = this.invMass[a];
+        const w2 = this.invMass[b];
+        const wSum = w1 + w2;
+        if (wSum === 0) continue;
+
+        const ia = 3 * a, ib = 3 * b;
+        const dx = this.pos[ib] - this.pos[ia];
+        const dy = this.pos[ib + 1] - this.pos[ia + 1];
+        const dz = this.pos[ib + 2] - this.pos[ia + 2];
+        const len = Math.hypot(dx, dy, dz);
+        if (len < 1e-8) continue;
+
+        const C = len - this.stretchRestLen[c];
+        const lambda = -C / (wSum + stretchAlpha);
+        const scale = lambda / len;
+
+        if (w1 > 0) {
+          this.pos[ia] -= dx * scale * w1;
+          this.pos[ia + 1] -= dy * scale * w1;
+          this.pos[ia + 2] -= dz * scale * w1;
+        }
+        if (w2 > 0) {
+          this.pos[ib] += dx * scale * w2;
+          this.pos[ib + 1] += dy * scale * w2;
+          this.pos[ib + 2] += dz * scale * w2;
+        }
+      }
+
+      // 3. Solve Dihedral Bending Constraints
+      this._solveBending(bendAlpha);
+
+      // 4. Floor Collision
+      const floorY = this.params.floorY;
+      for (let i = 0; i < N; i++) {
+        if (this.pinned[i]) continue;
+        const iy = 3 * i + 1;
+        if (this.pos[iy] < floorY) {
+          this.pos[iy] = floorY;
+          // Floor friction
+          this.pos[3 * i] = this.prevPos[3 * i] + (this.pos[3 * i] - this.prevPos[3 * i]) * 0.7;
+          this.pos[3 * i + 2] = this.prevPos[3 * i + 2] + (this.pos[3 * i + 2] - this.prevPos[3 * i + 2]) * 0.7;
+        }
+      }
+
+      // 5. Self-Collision (run every other substep for speed)
+      if (this.params.selfCollision && (step & 1) === 0) {
+        this._solveSelfCollision();
+      }
+
+      // 6. Update velocities from position change
+      const invSdt = 1.0 / sdt;
+      for (let i = 0; i < N; i++) {
+        if (this.pinned[i]) continue;
+        const ix = 3 * i, iy = ix + 1, iz = ix + 2;
+        this.vel[ix] = (this.pos[ix] - this.prevPos[ix]) * invSdt;
+        this.vel[iy] = (this.pos[iy] - this.prevPos[iy]) * invSdt;
+        this.vel[iz] = (this.pos[iz] - this.prevPos[iz]) * invSdt;
+      }
+    }
+
+    // 7. Elasto-Plastic Crease Memory Update (once per frame)
+    if (this.params.plasticity > 0.001) {
+      const plast = this.params.plasticity;
+      const yieldAngle = 0.26; // ~15 deg elastic threshold before plastic creasing
+      const maxPlastic = 2.15;
+      for (let h = 0; h < this.numBending; h++) {
+        const theta = this._computeDihedralAngle(
+          this.pos,
+          this.bendI0[h],
+          this.bendI1[h],
+          this.bendI2[h],
+          this.bendI3[h]
+        );
+        let diff = theta - this.bendRestAngle[h];
+        if (diff > Math.PI) diff -= 2 * Math.PI;
+        if (diff < -Math.PI) diff += 2 * Math.PI;
+
+        const absDiff = Math.abs(diff);
+        if (absDiff > yieldAngle) {
+          const excess = (absDiff - yieldAngle) * Math.sign(diff);
+          let nextRest = this.bendRestAngle[h] + excess * plast * 0.14;
+          if (nextRest > maxPlastic) nextRest = maxPlastic;
+          if (nextRest < -maxPlastic) nextRest = -maxPlastic;
+          this.bendRestAngle[h] = nextRest;
+        }
+      }
+    }
+  }
+
+  _solveBending(alpha) {
+    const p = this.pos;
+    for (let h = 0; h < this.numBending; h++) {
+      const i0 = this.bendI0[h];
+      const i1 = this.bendI1[h];
+      const i2 = this.bendI2[h];
+      const i3 = this.bendI3[h];
+
+      const w0 = this.invMass[i0];
+      const w1 = this.invMass[i1];
+      const w2 = this.invMass[i2];
+      const w3 = this.invMass[i3];
+      if (w0 + w1 + w2 + w3 === 0) continue;
+
+      const p0x = p[3 * i0], p0y = p[3 * i0 + 1], p0z = p[3 * i0 + 2];
+      const ex = p[3 * i1] - p0x, ey = p[3 * i1 + 1] - p0y, ez = p[3 * i1 + 2] - p0z;
+      const eLen = Math.hypot(ex, ey, ez);
+      if (eLen < 1e-6) continue;
+
+      const a2x = p[3 * i2] - p0x, a2y = p[3 * i2 + 1] - p0y, a2z = p[3 * i2 + 2] - p0z;
+      const a3x = p[3 * i3] - p0x, a3y = p[3 * i3 + 1] - p0y, a3z = p[3 * i3 + 2] - p0z;
+
+      // n1 = e x a2, n2 = a3 x e
+      let n1x = ey * a2z - ez * a2y;
+      let n1y = ez * a2x - ex * a2z;
+      let n1z = ex * a2y - ey * a2x;
+      const n1Len = Math.hypot(n1x, n1y, n1z);
+
+      let n2x = a3y * ez - a3z * ey;
+      let n2y = a3z * ex - a3x * ez;
+      let n2z = a3x * ey - a3y * ex;
+      const n2Len = Math.hypot(n2x, n2y, n2z);
+
+      if (n1Len < 1e-6 || n2Len < 1e-6) continue;
+      n1x /= n1Len; n1y /= n1Len; n1z /= n1Len;
+      n2x /= n2Len; n2y /= n2Len; n2z /= n2Len;
+
+      const cosT = Math.max(-0.9995, Math.min(0.9995, n1x * n2x + n1y * n2y + n1z * n2z));
+      const cx = n1y * n2z - n1z * n2y;
+      const cy = n1z * n2x - n1x * n2z;
+      const cz = n1x * n2y - n1y * n2x;
+      const sinT = (cx * ex + cy * ey + cz * ez) / eLen;
+      const theta = Math.atan2(sinT, cosT);
+
+      let C = theta - this.bendRestAngle[h];
+      if (C > Math.PI) C -= 2 * Math.PI;
+      if (C < -Math.PI) C += 2 * Math.PI;
+      if (Math.abs(C) < 1e-4) continue;
+
+      // Exact dihedral angle gradients (Bridson et al.)
+      // Moving i2 in +n1 or i3 in +n2 decreases theta, so gradients are -n1/h2 and -n2/h3
+      const invH2 = eLen / n1Len;
+      const invH3 = eLen / n2Len;
+
+      const q2x = -n1x * invH2, q2y = -n1y * invH2, q2z = -n1z * invH2;
+      const q3x = -n2x * invH3, q3y = -n2y * invH3, q3z = -n2z * invH3;
+
+      const invE2 = 1.0 / (eLen * eLen);
+      const u2 = (a2x * ex + a2y * ey + a2z * ez) * invE2;
+      const u3 = (a3x * ex + a3y * ey + a3z * ez) * invE2;
+
+      const q1x = -(u2 * q2x + u3 * q3x);
+      const q1y = -(u2 * q2y + u3 * q3y);
+      const q1z = -(u2 * q2z + u3 * q3z);
+
+      const q0x = -(q1x + q2x + q3x);
+      const q0y = -(q1y + q2y + q3y);
+      const q0z = -(q1z + q2z + q3z);
+
+      const denom =
+        w0 * (q0x * q0x + q0y * q0y + q0z * q0z) +
+        w1 * (q1x * q1x + q1y * q1y + q1z * q1z) +
+        w2 * (q2x * q2x + q2y * q2y + q2z * q2z) +
+        w3 * (q3x * q3x + q3y * q3y + q3z * q3z) +
+        alpha;
+
+      if (denom < 1e-10) continue;
+      // Clamp correction for stability
+      const dLambda = Math.max(-0.5, Math.min(0.5, -C / denom));
+
+      if (w0 > 0) { p[3 * i0] += w0 * dLambda * q0x; p[3 * i0 + 1] += w0 * dLambda * q0y; p[3 * i0 + 2] += w0 * dLambda * q0z; }
+      if (w1 > 0) { p[3 * i1] += w1 * dLambda * q1x; p[3 * i1 + 1] += w1 * dLambda * q1y; p[3 * i1 + 2] += w1 * dLambda * q1z; }
+      if (w2 > 0) { p[3 * i2] += w2 * dLambda * q2x; p[3 * i2 + 1] += w2 * dLambda * q2y; p[3 * i2 + 2] += w2 * dLambda * q2z; }
+      if (w3 > 0) { p[3 * i3] += w3 * dLambda * q3x; p[3 * i3 + 1] += w3 * dLambda * q3y; p[3 * i3 + 2] += w3 * dLambda * q3z; }
+    }
+  }
+
+  _solveSelfCollision() {
+    const N = this.numVerts;
+    const thickness = this.params.thickness;
+    const thicknessSq = thickness * thickness;
+    const invCell = 1.0 / (thickness * 1.6);
+    const HSIZE = this.hashSize;
+
+    this.cellStart.fill(0);
+
+    const hashCoord = (xi, yi, zi) => {
+      const h = (xi * 92837111) ^ (yi * 689287499) ^ (zi * 283923481);
+      return ((h % HSIZE) + HSIZE) % HSIZE;
+    };
+
+    for (let i = 0; i < N; i++) {
+      const xi = Math.floor(this.pos[3 * i] * invCell);
+      const yi = Math.floor(this.pos[3 * i + 1] * invCell);
+      const zi = Math.floor(this.pos[3 * i + 2] * invCell);
+      const h = hashCoord(xi, yi, zi);
+      this.vertCellHash[i] = h;
+      this.cellStart[h]++;
+    }
+
+    // Prefix sum
+    let sum = 0;
+    for (let i = 0; i < HSIZE; i++) {
+      sum += this.cellStart[i];
+      this.cellStart[i] = sum;
+    }
+    this.cellStart[HSIZE] = sum;
+
+    // Fill entries
+    for (let i = 0; i < N; i++) {
+      const h = this.vertCellHash[i];
+      this.cellStart[h]--;
+      this.cellEntries[this.cellStart[h]] = i;
+    }
+
+    // Query neighbors
+    for (let i = 0; i < N; i++) {
+      const px = this.pos[3 * i];
+      const py = this.pos[3 * i + 1];
+      const pz = this.pos[3 * i + 2];
+      const xi = Math.floor(px * invCell);
+      const yi = Math.floor(py * invCell);
+      const zi = Math.floor(pz * invCell);
+      const excl = this.excludeNeighbors[i];
+      const wi = this.invMass[i];
+
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const h = hashCoord(xi + dx, yi + dy, zi + dz);
+            const start = this.cellStart[h];
+            const end = this.cellStart[h + 1];
+            for (let k = start; k < end; k++) {
+              const j = this.cellEntries[k];
+              if (j <= i || excl.has(j)) continue;
+              const wj = this.invMass[j];
+              const wSum = wi + wj;
+              if (wSum === 0) continue;
+
+              const rx = this.pos[3 * j] - px;
+              const ry = this.pos[3 * j + 1] - py;
+              const rz = this.pos[3 * j + 2] - pz;
+              const dSq = rx * rx + ry * ry + rz * rz;
+              if (dSq < thicknessSq && dSq > 1e-12) {
+                const d = Math.sqrt(dSq);
+                const push = (thickness - d) / (d * wSum) * 0.55;
+                if (wi > 0) {
+                  this.pos[3 * i] -= rx * push * wi;
+                  this.pos[3 * i + 1] -= ry * push * wi;
+                  this.pos[3 * i + 2] -= rz * push * wi;
+                }
+                if (wj > 0) {
+                  this.pos[3 * j] += rx * push * wj;
+                  this.pos[3 * j + 1] += ry * push * wj;
+                  this.pos[3 * j + 2] += rz * push * wj;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
