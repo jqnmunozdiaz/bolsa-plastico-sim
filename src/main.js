@@ -112,37 +112,19 @@ floorMesh.position.y = -0.04;
 floorMesh.receiveShadow = true;
 scene.add(floorMesh);
 
-// 3. Create Bag Mesh & XPBD Physics Solver
-const bagData = createSupermarketBagGeometry({
-  width: 0.34,
-  height: 0.50,
-  gussetDepth: 0.068,
-  halfThickness: 0.018,
-  nx: 24,
-  ng: 6,
-  nv: 40,
-});
+// 3. Bag Mesh & XPBD Physics Solver (rebuilt when the mesh resolution changes)
+const RESOLUTIONS = {
+  low: { label: 'Baja', nx: 24, ng: 6, nv: 40 },
+  mid: { label: 'Media', nx: 36, ng: 8, nv: 60 },
+  high: { label: 'Alta', nx: 48, ng: 12, nv: 80 },
+};
+const BAG_SHAPE = { width: 0.34, height: 0.50, gussetDepth: 0.068, halfThickness: 0.018 };
+const SOLVER_FIXED = { thickness: 0.0085, floorY: -0.04, substeps: 7 };
 
-const solver = new XPBDBagSolver(bagData, {
-  gravity: 9.8,
-  bendingCompliance: 0.06,
-  plasticity: 0.88,
-  airDrag: 0.55,
-  airPressure: 0.0,
-  selfCollision: true,
-  thickness: 0.0085,
-  floorY: -0.04,
-  substeps: 7,
-});
-
-// Run physical warm-up so the bag starts suspended in the wrinkled reference pose
-solver.simulateReferencePose(170);
-
-// Sync initial solved positions to geometry
-const posAttr = bagData.geometry.attributes.position;
-posAttr.array.set(solver.pos);
-posAttr.needsUpdate = true;
-bagData.geometry.computeVertexNormals();
+let currentRes = 'low';
+let bagData = null;
+let solver = null;
+let posAttr = null;
 
 const rippleBump = createFilmRippleTexture();
 
@@ -166,7 +148,7 @@ const bagMaterial = new THREE.MeshPhysicalMaterial({
   depthWrite: true,
 });
 
-const bagMesh = new THREE.Mesh(bagData.geometry, bagMaterial);
+const bagMesh = new THREE.Mesh(new THREE.BufferGeometry(), bagMaterial);
 bagMesh.castShadow = true;
 bagMesh.receiveShadow = true;
 scene.add(bagMesh);
@@ -178,9 +160,53 @@ const wireMat = new THREE.MeshBasicMaterial({
   transparent: true,
   opacity: 0.22,
 });
-const wireMesh = new THREE.Mesh(bagData.geometry, wireMat);
+const wireMesh = new THREE.Mesh(bagMesh.geometry, wireMat);
 wireMesh.visible = false;
 scene.add(wireMesh);
+
+function readUiParams() {
+  const num = (id) => parseFloat(document.getElementById(id).value);
+  return {
+    gravity: num('sliderGravity'),
+    bendingCompliance: num('sliderBend'),
+    plasticity: num('sliderPlastic'),
+    airDrag: num('sliderDrag'),
+    airPressure: num('sliderPressure'),
+    selfCollision: document.getElementById('chkSelfCol').checked,
+  };
+}
+
+function syncGeometry() {
+  posAttr.array.set(solver.pos);
+  posAttr.needsUpdate = true;
+  bagData.geometry.computeVertexNormals();
+  bagData.geometry.boundingSphere = null; // recomputed lazily for raycasting/culling
+}
+
+/** (Re)creates the mesh + solver at the given resolution and starts the reference-pose warm-up. */
+function buildBag(resKey) {
+  const res = RESOLUTIONS[resKey];
+  const oldGeometry = bagData ? bagData.geometry : bagMesh.geometry;
+  endBagDrag();
+
+  bagData = createSupermarketBagGeometry({ ...BAG_SHAPE, nx: res.nx, ng: res.ng, nv: res.nv });
+  solver = new XPBDBagSolver(bagData, { ...SOLVER_FIXED, ...readUiParams() });
+  posAttr = bagData.geometry.attributes.position;
+  bagMesh.geometry = bagData.geometry;
+  wireMesh.geometry = bagData.geometry;
+  oldGeometry.dispose();
+  currentRes = resKey;
+
+  // Physical warm-up runs over the next frames so the page never freezes
+  solver.beginReferencePose(170);
+  syncGeometry();
+
+  document.getElementById('valRes').textContent = res.label;
+  for (const btn of document.querySelectorAll('#resSeg button')) {
+    btn.classList.toggle('active', btn.dataset.res === resKey);
+  }
+  refreshStatus();
+}
 
 // 4. Interactive Mouse Raycast Dragging on the Bag
 const raycaster = new THREE.Raycaster();
@@ -300,7 +326,7 @@ window.addEventListener('pointermove', (e) => {
   }
 });
 
-window.addEventListener('pointerup', () => {
+function endBagDrag() {
   if (isDraggingBag) {
     isDraggingBag = false;
     solver.dragVertex = -1;
@@ -311,7 +337,11 @@ window.addEventListener('pointerup', () => {
     renderer.domElement.style.cursor = 'grab';
     controls.enabled = true;
   }
-});
+}
+
+window.addEventListener('pointerup', endBagDrag);
+window.addEventListener('pointercancel', endBagDrag);
+window.addEventListener('blur', endBagDrag);
 
 // 5. UI Controls Wiring (Spanish)
 let paused = false;
@@ -334,10 +364,10 @@ btnWrinkleMode.addEventListener('click', () => {
 });
 
 document.getElementById('btnRefPose').addEventListener('click', () => {
-  solver.simulateReferencePose(170);
-  posAttr.array.set(solver.pos);
-  posAttr.needsUpdate = true;
-  bagData.geometry.computeVertexNormals();
+  endBagDrag();
+  solver.beginReferencePose(170);
+  syncGeometry();
+  refreshStatus();
 });
 document.getElementById('btnCrumple').addEventListener('click', () => {
   solver.triggerCrumpleImpulse();
@@ -346,23 +376,38 @@ document.getElementById('btnShake').addEventListener('click', () => {
   solver.triggerAirGust();
 });
 document.getElementById('btnFlat').addEventListener('click', () => {
+  endBagDrag();
   solver.resetFlat();
-  posAttr.array.set(solver.pos);
-  posAttr.needsUpdate = true;
-  bagData.geometry.computeVertexNormals();
+  syncGeometry();
+  refreshStatus();
 });
 
 const btnPause = document.getElementById('btnPause');
 const btnDownloadStl = document.getElementById('btnDownloadStl');
 
+const statsBar = document.getElementById('statsBar');
+
+function refreshStatus() {
+  const warming = solver.isWarmingUp();
+  const ready = paused && !warming;
+  btnDownloadStl.disabled = !ready;
+  btnDownloadStl.classList.toggle('stl-ready', ready);
+  btnDownloadStl.title = warming
+    ? 'Espera a que termine la pose de referencia'
+    : paused
+      ? 'Descargar modelo 3D en STL (mm, máx. 24 cm por eje)'
+      : 'Pausa la simulación (Espacio) para descargar el STL';
+
+  const counts = `${bagData.numVertices.toLocaleString('es-ES')} vértices • ${bagData.numTriangles.toLocaleString('es-ES')} triángulos`;
+  statsBar.textContent = warming
+    ? `Generando pose de referencia… ${Math.round(solver.warmupProgress() * 100)} % • ${counts}`
+    : `${counts} • Arrastra para tirar • Espacio: Pausar • Órbita: Arrastrar fuera`;
+}
+
 function setPaused(nextPaused) {
   paused = nextPaused;
   btnPause.textContent = paused ? 'Reanudar (Espacio)' : 'Pausar (Espacio)';
-  btnDownloadStl.disabled = !paused;
-  btnDownloadStl.classList.toggle('stl-ready', paused);
-  btnDownloadStl.title = paused
-    ? 'Descargar modelo 3D en formato STL (escala en mm)'
-    : 'Pausa la simulación (Espacio) para descargar el STL';
+  refreshStatus();
 }
 
 btnPause.addEventListener('click', () => {
@@ -376,14 +421,29 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Binary STL Export (available when paused, exported in millimeters)
+// Binary STL Export (available when paused, scaled proportionally so X, Y, Z <= 24 cm / 240 mm)
 const stlExporter = new STLExporter();
 btnDownloadStl.addEventListener('click', () => {
-  if (!paused) return;
+  if (!paused || solver.isWarmingUp()) return;
   const exportGeo = bagData.geometry.clone();
-  // Convert meters -> millimeters and orient Z-up for standard 3D slicers/CAD
-  exportGeo.scale(1000, 1000, 1000);
+  // Orient for 3D print build plate (Z-up)
   exportGeo.rotateX(Math.PI / 2);
+  exportGeo.computeBoundingBox();
+
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  exportGeo.boundingBox.getSize(size);
+  exportGeo.boundingBox.getCenter(center);
+
+  // Convert meters -> mm, reducing proportionally if any axis exceeds 240 mm (24 cm).
+  // Tiny safety margin so float rounding can never push an axis above 240.0 mm.
+  const maxDimMeters = Math.max(size.x, size.y, size.z);
+  const maxAllowedMm = 240 * 0.9995;
+  const scaleMm = Math.min(1000, maxAllowedMm / maxDimMeters);
+
+  exportGeo.translate(-center.x, -center.y, -exportGeo.boundingBox.min.z);
+  exportGeo.scale(scaleMm, scaleMm, scaleMm);
+
   const exportMesh = new THREE.Mesh(exportGeo);
   const stlBuffer = stlExporter.parse(exportMesh, { binary: true });
   exportGeo.dispose();
@@ -392,7 +452,7 @@ btnDownloadStl.addEventListener('click', () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'bolsa-supermercado.stl';
+  a.download = `bolsa-supermercado-${currentRes}.stl`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -411,7 +471,7 @@ function bindSlider(id, valId, paramKey) {
   const label = document.getElementById(valId);
   slider.addEventListener('input', () => {
     const v = parseFloat(slider.value);
-    solver.params[paramKey] = v;
+    solver.setParam(paramKey, v);
     label.textContent = v.toFixed(paramKey === 'gravity' ? 1 : 2);
   });
 }
@@ -429,8 +489,20 @@ document.getElementById('chkWireframe').addEventListener('change', (e) => {
   wireMesh.visible = e.target.checked;
 });
 
-document.getElementById('statsBar').textContent =
-  `${bagData.numVertices.toLocaleString()} vértices • ${bagData.numTriangles.toLocaleString()} triángulos • Arrastra para tirar • Espacio: Pausar • Órbita: Arrastrar fuera`;
+// Mesh resolution selector (vertex counts computed from the actual generator)
+for (const [key, res] of Object.entries(RESOLUTIONS)) {
+  const probe = createSupermarketBagGeometry({ ...BAG_SHAPE, nx: res.nx, ng: res.ng, nv: res.nv });
+  const k = (probe.numVertices / 1000).toLocaleString('es-ES', { maximumFractionDigits: 1 });
+  document.querySelector(`#resSeg button[data-res="${key}"] small`).textContent = `${k}k vért.`;
+  probe.geometry.dispose();
+}
+document.getElementById('resSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-res]');
+  if (!btn || btn.dataset.res === currentRes) return;
+  buildBag(btn.dataset.res);
+});
+
+buildBag('low');
 
 // 6. Animation Loop
 window.addEventListener('resize', () => {
@@ -442,11 +514,17 @@ window.addEventListener('resize', () => {
 function animate() {
   requestAnimationFrame(animate);
 
-  if (!paused) {
+  if (solver.isWarmingUp()) {
+    // Spread the reference-pose warm-up over frames (~28 ms of physics per frame)
+    const t0 = performance.now();
+    do {
+      solver.advanceReferencePose(1);
+    } while (solver.isWarmingUp() && performance.now() - t0 < 28);
+    syncGeometry();
+    refreshStatus();
+  } else if (!paused) {
     solver.step((1 / 60) * simSpeed);
-    posAttr.array.set(solver.pos);
-    posAttr.needsUpdate = true;
-    bagData.geometry.computeVertexNormals();
+    syncGeometry();
   }
 
   controls.update();

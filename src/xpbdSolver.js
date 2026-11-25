@@ -31,6 +31,19 @@ export class XPBDBagSolver {
       substeps: params.substeps ?? 7,
     };
 
+    // Resolution normalisation (reference mesh: nx = 24, nv = 40).
+    // Every vertex has unit mass, so with a finer mesh each vertex carries less film area:
+    // scale aerodynamic forces by N / N_ref so drag & pressure feel the same at any resolution.
+    const dims = bagMeshData.dimensions;
+    const edgeRatio = Math.sqrt((24 * 40) / (dims.nx * dims.nv)); // ~ edge length / reference edge length
+    this.aeroScale = 1 / (edgeRatio * edgeRatio);
+    // Smaller hinges see smaller angles for the same curvature -> lower the plastic yield angle
+    this.yieldAngle = 0.26 * edgeRatio;
+    // Allow more candidates per hash cell when the mesh is denser
+    this.cellCap = Math.round(24 / (edgeRatio * edgeRatio));
+    // Gauss-Seidel converges more slowly on finer meshes: add cheap extra stretch passes
+    this.stretchIters = params.stretchIters ?? (edgeRatio < 0.6 ? 3 : edgeRatio < 0.9 ? 2 : 1);
+
     const N = this.numVerts;
     this.restPos = new Float32Array(bagMeshData.positions);
     this.pos = new Float32Array(bagMeshData.positions);
@@ -58,7 +71,7 @@ export class XPBDBagSolver {
       const dx = this.restPos[3 * b] - this.restPos[3 * a];
       const dy = this.restPos[3 * b + 1] - this.restPos[3 * a + 1];
       const dz = this.restPos[3 * b + 2] - this.restPos[3 * a + 2];
-      this.stretchRestLen[i] = Math.hypot(dx, dy, dz);
+      this.stretchRestLen[i] = Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     // Precompute dihedral bending hinges & rest angles
@@ -88,7 +101,10 @@ export class XPBDBagSolver {
       adj1[this.stretchA[i]].add(this.stretchB[i]);
       adj1[this.stretchB[i]].add(this.stretchA[i]);
     }
-    this.excludeNeighbors = Array.from({ length: N }, (_, i) => {
+    // Stored flat (CSR) so the collision pass can mark them in a typed array instead of Set lookups
+    const exclLists = [];
+    let exclTotal = 0;
+    for (let i = 0; i < N; i++) {
       const s = new Set(adj1[i]);
       s.add(i);
       for (const n1 of adj1[i]) {
@@ -96,11 +112,25 @@ export class XPBDBagSolver {
           s.add(n2);
         }
       }
-      return s;
-    });
+      exclLists.push(s);
+      exclTotal += s.size;
+    }
+    this.exclStart = new Int32Array(N + 1);
+    this.exclIdx = new Int32Array(exclTotal);
+    let off = 0;
+    for (let i = 0; i < N; i++) {
+      this.exclStart[i] = off;
+      for (const j of exclLists[i]) this.exclIdx[off++] = j;
+    }
+    this.exclStart[N] = off;
+    this.exclMark = new Int32Array(N).fill(-1);
+
+    // Per-frame aerodynamic force buffer (reused to avoid allocations)
+    this.aeroForces = new Float32Array(N * 3);
 
     // Spatial hash buffers (zero-allocation per step)
     this.hashSize = 8192;
+    while (this.hashSize < 2 * N) this.hashSize *= 2;
     this.cellStart = new Int32Array(this.hashSize + 1);
     this.cellEntries = new Int32Array(N);
     this.vertCellHash = new Int32Array(N);
@@ -121,7 +151,7 @@ export class XPBDBagSolver {
   _computeDihedralAngle(p, i0, i1, i2, i3) {
     const p0x = p[3 * i0], p0y = p[3 * i0 + 1], p0z = p[3 * i0 + 2];
     const ex = p[3 * i1] - p0x, ey = p[3 * i1 + 1] - p0y, ez = p[3 * i1 + 2] - p0z;
-    const eLen = Math.hypot(ex, ey, ez);
+    const eLen = Math.sqrt(ex * ex + ey * ey + ez * ez);
     if (eLen < 1e-7) return 0;
 
     const a2x = p[3 * i2] - p0x, a2y = p[3 * i2 + 1] - p0y, a2z = p[3 * i2 + 2] - p0z;
@@ -131,12 +161,12 @@ export class XPBDBagSolver {
     let n1x = ey * a2z - ez * a2y;
     let n1y = ez * a2x - ex * a2z;
     let n1z = ex * a2y - ey * a2x;
-    const n1Len = Math.hypot(n1x, n1y, n1z);
+    const n1Len = Math.sqrt(n1x * n1x + n1y * n1y + n1z * n1z);
 
     let n2x = a3y * ez - a3z * ey;
     let n2y = a3z * ex - a3x * ez;
     let n2z = a3x * ey - a3y * ex;
-    const n2Len = Math.hypot(n2x, n2y, n2z);
+    const n2Len = Math.sqrt(n2x * n2x + n2y * n2y + n2z * n2z);
 
     if (n1Len < 1e-7 || n2Len < 1e-7) return 0;
     n1x /= n1Len; n1y /= n1Len; n1z /= n1Len;
@@ -151,7 +181,14 @@ export class XPBDBagSolver {
     return Math.atan2(sinT, cosT);
   }
 
+  /** Sets a UI parameter; during warm-up, air settings are stored and applied when it ends. */
+  setParam(key, value) {
+    if (this.warmup && key in this.warmupSaved) this.warmupSaved[key] = value;
+    else this.params[key] = value;
+  }
+
   resetFlat() {
+    this.cancelReferencePose();
     this.pos.set(this.restPos);
     this.prevPos.set(this.restPos);
     this.vel.fill(0);
@@ -212,6 +249,12 @@ export class XPBDBagSolver {
    * naturally before releasing into pure free-hanging equilibrium.
    */
   simulateReferencePose(steps = 170) {
+    this.beginReferencePose(steps);
+    while (this.isWarmingUp()) this.advanceReferencePose(steps);
+  }
+
+  /** Starts an incremental reference-pose warm-up (advance it with advanceReferencePose). */
+  beginReferencePose(steps = 170) {
     this.pos.set(this.restPos);
     this.prevPos.set(this.restPos);
     this.vel.fill(0);
@@ -239,13 +282,31 @@ export class XPBDBagSolver {
       { x: 0.108, y: 0.495, z: -0.05 }
     );
 
-    const dt = 1 / 60;
-    const savedDrag = this.params.airDrag;
-    const savedPress = this.params.airPressure;
+    // If a warm-up was already running, keep the user's original values
+    if (!this.warmup) {
+      this.warmupSaved = { airDrag: this.params.airDrag, airPressure: this.params.airPressure };
+    }
     this.params.airDrag = 0.72;
     this.params.airPressure = -0.06; // Slight deflation during crease formation
+    this.warmup = { step: 0, total: steps };
+  }
 
-    for (let s = 0; s < steps; s++) {
+  isWarmingUp() {
+    return !!this.warmup;
+  }
+
+  /** Warm-up progress in [0, 1]. */
+  warmupProgress() {
+    return this.warmup ? this.warmup.step / this.warmup.total : 1;
+  }
+
+  /** Runs up to maxSteps warm-up steps; returns true when the warm-up has finished. */
+  advanceReferencePose(maxSteps = 1) {
+    if (!this.warmup) return true;
+    const dt = 1 / 60;
+    const steps = this.warmup.total;
+    for (let n = 0; n < maxSteps && this.warmup.step < steps; n++) {
+      const s = this.warmup.step++;
       this.extForces.fill(0);
       if (s < steps * 0.72) {
         const env = Math.sin((s / (steps * 0.72)) * Math.PI);
@@ -277,9 +338,17 @@ export class XPBDBagSolver {
       this.step(dt);
     }
 
+    if (this.warmup.step >= steps) this.cancelReferencePose();
+    return !this.warmup;
+  }
+
+  /** Ends the warm-up (finished or interrupted) and restores the user's air settings. */
+  cancelReferencePose() {
+    if (!this.warmup) return;
     this.extForces.fill(0);
-    this.params.airDrag = savedDrag;
-    this.params.airPressure = savedPress;
+    this.params.airDrag = this.warmupSaved.airDrag;
+    this.params.airPressure = this.warmupSaved.airPressure;
+    this.warmup = null;
   }
 
   /**
@@ -316,9 +385,10 @@ export class XPBDBagSolver {
     const N = this.numVerts;
 
     // Precompute aerodynamic & pressure forces once per frame
-    const aeroForces = new Float32Array(N * 3);
-    const dragK = this.params.airDrag * 18.0;
-    const pressK = this.params.airPressure * 2.2;
+    const aeroForces = this.aeroForces;
+    aeroForces.fill(0);
+    const dragK = this.params.airDrag * 18.0 * this.aeroScale;
+    const pressK = this.params.airPressure * 2.2 * this.aeroScale;
     const H = this.dimensions.H;
 
     for (let t = 0; t < this.numTris; t++) {
@@ -333,7 +403,7 @@ export class XPBDBagSolver {
       let nx = e1y * e2z - e1z * e2y;
       let ny = e1z * e2x - e1x * e2z;
       let nz = e1x * e2y - e1y * e2x;
-      const area2 = Math.hypot(nx, ny, nz);
+      const area2 = Math.sqrt(nx * nx + ny * ny + nz * nz);
       if (area2 < 1e-9) continue;
       const area = 0.5 * area2;
       nx /= area2; ny /= area2; nz /= area2;
@@ -435,35 +505,37 @@ export class XPBDBagSolver {
         }
       }
 
-      // 2. Solve Stretch Constraints
-      for (let c = 0; c < this.numStretch; c++) {
-        const a = this.stretchA[c];
-        const b = this.stretchB[c];
-        const w1 = this.invMass[a];
-        const w2 = this.invMass[b];
-        const wSum = w1 + w2;
-        if (wSum === 0) continue;
+      // 2. Solve Stretch Constraints (extra passes on finer meshes keep the film from sagging)
+      for (let it = 0; it < this.stretchIters; it++) {
+        for (let c = 0; c < this.numStretch; c++) {
+          const a = this.stretchA[c];
+          const b = this.stretchB[c];
+          const w1 = this.invMass[a];
+          const w2 = this.invMass[b];
+          const wSum = w1 + w2;
+          if (wSum === 0) continue;
 
-        const ia = 3 * a, ib = 3 * b;
-        const dx = this.pos[ib] - this.pos[ia];
-        const dy = this.pos[ib + 1] - this.pos[ia + 1];
-        const dz = this.pos[ib + 2] - this.pos[ia + 2];
-        const len = Math.hypot(dx, dy, dz);
-        if (len < 1e-8) continue;
+          const ia = 3 * a, ib = 3 * b;
+          const dx = this.pos[ib] - this.pos[ia];
+          const dy = this.pos[ib + 1] - this.pos[ia + 1];
+          const dz = this.pos[ib + 2] - this.pos[ia + 2];
+          const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (len < 1e-8) continue;
 
-        const C = len - this.stretchRestLen[c];
-        const lambda = -C / (wSum + stretchAlpha);
-        const scale = lambda / len;
+          const C = len - this.stretchRestLen[c];
+          const lambda = -C / (wSum + stretchAlpha);
+          const scale = lambda / len;
 
-        if (w1 > 0) {
-          this.pos[ia] -= dx * scale * w1;
-          this.pos[ia + 1] -= dy * scale * w1;
-          this.pos[ia + 2] -= dz * scale * w1;
-        }
-        if (w2 > 0) {
-          this.pos[ib] += dx * scale * w2;
-          this.pos[ib + 1] += dy * scale * w2;
-          this.pos[ib + 2] += dz * scale * w2;
+          if (w1 > 0) {
+            this.pos[ia] -= dx * scale * w1;
+            this.pos[ia + 1] -= dy * scale * w1;
+            this.pos[ia + 2] -= dz * scale * w1;
+          }
+          if (w2 > 0) {
+            this.pos[ib] += dx * scale * w2;
+            this.pos[ib + 1] += dy * scale * w2;
+            this.pos[ib + 2] += dz * scale * w2;
+          }
         }
       }
 
@@ -483,26 +555,42 @@ export class XPBDBagSolver {
         }
       }
 
-      // 5. Self-Collision (run every other substep for speed)
-      if (this.params.selfCollision && (step & 1) === 0) {
+      // 5. Self-Collision (run once per frame on last substep to prevent CPU spikes/stuttering)
+      if (this.params.selfCollision && step === substeps - 1) {
         this._solveSelfCollision();
       }
 
-      // 6. Update velocities from position change
+      // 6. Update velocities from position change (with velocity clamp & NaN guard)
       const invSdt = 1.0 / sdt;
+      const maxVel = 4.5;
       for (let i = 0; i < N; i++) {
         if (this.pinned[i]) continue;
         const ix = 3 * i, iy = ix + 1, iz = ix + 2;
-        this.vel[ix] = (this.pos[ix] - this.prevPos[ix]) * invSdt;
-        this.vel[iy] = (this.pos[iy] - this.prevPos[iy]) * invSdt;
-        this.vel[iz] = (this.pos[iz] - this.prevPos[iz]) * invSdt;
+        if (!Number.isFinite(this.pos[ix]) || !Number.isFinite(this.pos[iy]) || !Number.isFinite(this.pos[iz])) {
+          this.pos[ix] = this.prevPos[ix];
+          this.pos[iy] = this.prevPos[iy];
+          this.pos[iz] = this.prevPos[iz];
+          this.vel[ix] = 0; this.vel[iy] = 0; this.vel[iz] = 0;
+          continue;
+        }
+        let vx = (this.pos[ix] - this.prevPos[ix]) * invSdt;
+        let vy = (this.pos[iy] - this.prevPos[iy]) * invSdt;
+        let vz = (this.pos[iz] - this.prevPos[iz]) * invSdt;
+        const vLen = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        if (vLen > maxVel) {
+          const s = maxVel / vLen;
+          vx *= s; vy *= s; vz *= s;
+        }
+        this.vel[ix] = vx;
+        this.vel[iy] = vy;
+        this.vel[iz] = vz;
       }
     }
 
     // 7. Elasto-Plastic Crease Memory Update (once per frame)
     if (this.params.plasticity > 0.001) {
       const plast = this.params.plasticity;
-      const yieldAngle = 0.26; // ~15 deg elastic threshold before plastic creasing
+      const yieldAngle = this.yieldAngle; // ~15 deg (at reference resolution) elastic threshold before plastic creasing
       const maxPlastic = 2.15;
       for (let h = 0; h < this.numBending; h++) {
         const theta = this._computeDihedralAngle(
@@ -544,7 +632,7 @@ export class XPBDBagSolver {
 
       const p0x = p[3 * i0], p0y = p[3 * i0 + 1], p0z = p[3 * i0 + 2];
       const ex = p[3 * i1] - p0x, ey = p[3 * i1 + 1] - p0y, ez = p[3 * i1 + 2] - p0z;
-      const eLen = Math.hypot(ex, ey, ez);
+      const eLen = Math.sqrt(ex * ex + ey * ey + ez * ez);
       if (eLen < 1e-6) continue;
 
       const a2x = p[3 * i2] - p0x, a2y = p[3 * i2 + 1] - p0y, a2z = p[3 * i2 + 2] - p0z;
@@ -554,12 +642,12 @@ export class XPBDBagSolver {
       let n1x = ey * a2z - ez * a2y;
       let n1y = ez * a2x - ex * a2z;
       let n1z = ex * a2y - ey * a2x;
-      const n1Len = Math.hypot(n1x, n1y, n1z);
+      const n1Len = Math.sqrt(n1x * n1x + n1y * n1y + n1z * n1z);
 
       let n2x = a3y * ez - a3z * ey;
       let n2y = a3z * ex - a3x * ez;
       let n2z = a3x * ey - a3y * ex;
-      const n2Len = Math.hypot(n2x, n2y, n2z);
+      const n2Len = Math.sqrt(n2x * n2x + n2y * n2y + n2z * n2z);
 
       if (n1Len < 1e-6 || n2Len < 1e-6) continue;
       n1x /= n1Len; n1y /= n1Len; n1z /= n1Len;
@@ -661,7 +749,8 @@ export class XPBDBagSolver {
       const xi = Math.floor(px * invCell);
       const yi = Math.floor(py * invCell);
       const zi = Math.floor(pz * invCell);
-      const excl = this.excludeNeighbors[i];
+      const exclMark = this.exclMark;
+      for (let e = this.exclStart[i]; e < this.exclStart[i + 1]; e++) exclMark[this.exclIdx[e]] = i;
       const wi = this.invMass[i];
 
       for (let dx = -1; dx <= 1; dx++) {
@@ -669,10 +758,10 @@ export class XPBDBagSolver {
           for (let dz = -1; dz <= 1; dz++) {
             const h = hashCoord(xi + dx, yi + dy, zi + dz);
             const start = this.cellStart[h];
-            const end = this.cellStart[h + 1];
+            const end = Math.min(this.cellStart[h + 1], start + this.cellCap);
             for (let k = start; k < end; k++) {
               const j = this.cellEntries[k];
-              if (j <= i || excl.has(j)) continue;
+              if (j <= i || exclMark[j] === i) continue;
               const wj = this.invMass[j];
               const wSum = wi + wj;
               if (wSum === 0) continue;

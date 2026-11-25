@@ -19,7 +19,10 @@ export function createSupermarketBagGeometry(options = {}) {
 
   const NU = 2 * nx + 2 * ng;
   const ivMouth = Math.floor(nv * 0.69); // mouth bottom at 69% height -> smaller, realistic handles
-  const handleCols = 4; // narrower handle straps on front/back
+  // Resolution-independent proportions (tuned at nx = 24, nv = 40)
+  const handleCols = Math.max(2, Math.round(nx / 6)); // narrower handle straps on front/back
+  const tipRows = Math.max(1, Math.round(nv / 40)); // rows welded/pinned at each handle tip
+  const rimMargin = 3 * nv / 40; // gap between U-rim top and handle tips
   const halfNx = nx / 2;
   const mouthHalfCols = halfNx - handleCols; // center columns that stop at the U-rim
 
@@ -36,7 +39,7 @@ export function createSupermarketBagGeometry(options = {}) {
     const s = d / mouthHalfCols; // 0 at center, 1 at handle inner edge
     // Smooth U-curve from ivMouth up to nv - 4
     const uCurve = Math.pow(s, 2.2);
-    return ivMouth + uCurve * (nv - 3 - ivMouth);
+    return ivMouth + uCurve * (nv - rimMargin - ivMouth);
   }
 
   // Precompute top row (float) for each column iu
@@ -169,8 +172,8 @@ export function createSupermarketBagGeometry(options = {}) {
       const y = vNorm * H;
       const { x, z, gusset } = getPerimeterXZ(iu, vNorm, vNorm);
 
-      const isLeft = iv >= nv - 1 && (iu <= handleCols || iu >= 2 * nx + ng - handleCols);
-      const isRight = iv >= nv - 1 && (iu >= nx - handleCols && iu <= nx + ng + handleCols);
+      const isLeft = iv >= nv - tipRows && (iu <= handleCols || iu >= 2 * nx + ng - handleCols);
+      const isRight = iv >= nv - tipRows && (iu >= nx - handleCols && iu <= nx + ng + handleCols);
 
       gridIdx[iv][iu] = addVertex(
         x,
