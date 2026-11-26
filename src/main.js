@@ -7,6 +7,7 @@ import { solidifyShell } from './solidify.js';
 import { writeBinaryStl } from './printable.js';
 import { SimHistory } from './history.js';
 import StlWorker from './stlWorker.js?worker&inline';
+import { setupPanel } from './panel.js';
 
 /**
  * Generates a procedural fine HDPE extrusion-ripple bump texture
@@ -216,7 +217,6 @@ function buildBag(resKey) {
   resetHistory();
   syncGeometry();
 
-  document.getElementById('valRes').textContent = res.label;
   for (const btn of document.querySelectorAll('#resSeg button')) {
     btn.classList.toggle('active', btn.dataset.res === resKey);
   }
@@ -373,10 +373,8 @@ toggleHudBtn.addEventListener('click', () => {
 const btnWrinkleMode = document.getElementById('btnWrinkleMode');
 btnWrinkleMode.addEventListener('click', () => {
   wrinkleBrushEnabled = !wrinkleBrushEnabled;
-  btnWrinkleMode.textContent = wrinkleBrushEnabled ? 'Pincel Arrugas: SÍ' : 'Pincel Arrugas: NO';
-  btnWrinkleMode.style.borderColor = wrinkleBrushEnabled ? '#0284c7' : '';
-  btnWrinkleMode.style.color = wrinkleBrushEnabled ? '#0284c7' : '';
-  btnWrinkleMode.style.background = wrinkleBrushEnabled ? '#e0f2fe' : '';
+  btnWrinkleMode.textContent = wrinkleBrushEnabled ? 'Pincel arrugas: SÍ' : 'Pincel arrugas: NO';
+  btnWrinkleMode.classList.toggle('toggled', wrinkleBrushEnabled);
 });
 
 document.getElementById('btnRefPose').addEventListener('click', () => {
@@ -412,7 +410,6 @@ const statsBar = document.getElementById('statsBar');
 const sliderTime = document.getElementById('sliderTime');
 const valTime = document.getElementById('valTime');
 const sliderWall = document.getElementById('sliderWall');
-const valWall = document.getElementById('valWall');
 const chkBase = document.getElementById('chkBase');
 let stlBusy = false;
 let stlProgress = '';
@@ -512,9 +509,6 @@ const MAX_MM = 240 * 0.9995; // tiny margin so float rounding never exceeds 240.
 let stlWorker = null;
 let stlJobId = 0;
 
-sliderWall.addEventListener('input', () => {
-  valWall.textContent = `${parseFloat(sliderWall.value).toFixed(1)} mm`;
-});
 
 function runStlWorker(positions, indices, options) {
   if (!stlWorker) stlWorker = new StlWorker();
@@ -630,27 +624,20 @@ btnDownloadStl.addEventListener('click', async () => {
 });
 
 const sliderSpeed = document.getElementById('sliderSpeed');
-const valSpeed = document.getElementById('valSpeed');
 sliderSpeed.addEventListener('input', () => {
   simSpeed = parseFloat(sliderSpeed.value);
-  valSpeed.textContent = `${simSpeed.toFixed(2)}x`;
 });
 
-function bindSlider(id, valId, paramKey) {
+function bindSlider(id, paramKey) {
   const slider = document.getElementById(id);
-  const label = document.getElementById(valId);
-  slider.addEventListener('input', () => {
-    const v = parseFloat(slider.value);
-    solver.setParam(paramKey, v);
-    label.textContent = v.toFixed(paramKey === 'gravity' ? 1 : 2);
-  });
+  slider.addEventListener('input', () => solver.setParam(paramKey, parseFloat(slider.value)));
 }
 
-bindSlider('sliderBend', 'valBend', 'bendingCompliance');
-bindSlider('sliderPlastic', 'valPlastic', 'plasticity');
-bindSlider('sliderDrag', 'valDrag', 'airDrag');
-bindSlider('sliderPressure', 'valPressure', 'airPressure');
-bindSlider('sliderGravity', 'valGravity', 'gravity');
+bindSlider('sliderBend', 'bendingCompliance');
+bindSlider('sliderPlastic', 'plasticity');
+bindSlider('sliderDrag', 'airDrag');
+bindSlider('sliderPressure', 'airPressure');
+bindSlider('sliderGravity', 'gravity');
 
 document.getElementById('chkSelfCol').addEventListener('change', (e) => {
   solver.params.selfCollision = e.target.checked;
@@ -697,7 +684,7 @@ const sliderWind = document.getElementById('sliderWind');
 const sliderWindDir = document.getElementById('sliderWindDir');
 const sliderWindElev = document.getElementById('sliderWindElev');
 const sliderWindTurb = document.getElementById('sliderWindTurb');
-const DIR_NAMES = ['derecha', 'fondo-der.', 'fondo', 'fondo-izq.', 'izquierda', 'cámara-izq.', 'hacia cámara', 'cámara-der.'];
+const DIR_NAMES = ['la derecha', 'el fondo-der.', 'el fondo', 'el fondo-izq.', 'la izquierda', 'la cámara-izq.', 'la cámara', 'la cámara-der.'];
 
 // Arrow in the scene showing where the wind blows (as seen from the default camera)
 const windArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 0.1, 0x0ea5e9, 0.035, 0.022);
@@ -708,10 +695,9 @@ function updateWindUi() {
   const speed = parseFloat(sliderWind.value);
   const az = parseFloat(sliderWindDir.value);
   const el = parseFloat(sliderWindElev.value);
-  document.getElementById('valWind').textContent = speed > 0 ? `${speed.toFixed(1)} m/s` : 'Sin viento';
-  document.getElementById('valWindDir').textContent = `${az.toFixed(0)}° (${DIR_NAMES[Math.round(az / 45) % 8]})`;
-  document.getElementById('valWindElev').textContent = `${el > 0 ? '+' : ''}${el.toFixed(0)}°`;
-  document.getElementById('valWindTurb').textContent = parseFloat(sliderWindTurb.value).toFixed(2);
+  document.getElementById('windSpeedHint').textContent =
+    speed === 0 ? 'sin viento' : speed < 5 ? 'brisa' : speed < 9 ? 'moderado' : 'fuerte';
+  document.getElementById('windDirHint').textContent = `hacia ${DIR_NAMES[Math.round(az / 45) % 8]}`;
 
   const a = (az * Math.PI) / 180;
   const e = (el * Math.PI) / 180;
@@ -750,6 +736,7 @@ document.getElementById('resSeg').addEventListener('click', (e) => {
   buildBag(btn.dataset.res);
 });
 
+setupPanel();
 buildBag('low');
 
 // 6. Animation Loop
