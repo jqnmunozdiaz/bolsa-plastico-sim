@@ -257,6 +257,21 @@
       cursor: pointer;
       margin-left: auto;
     }
+    .ctl-select {
+      width: 100%;
+      padding: 5px 6px;
+      border: 1px solid rgba(148, 163, 184, 0.5);
+      border-radius: 7px;
+      background: #fff;
+      font: inherit;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--ink);
+      cursor: pointer;
+    }
+    .ctl-select:focus { outline: none; border-color: var(--accent); }
+    .btn-row.mini { grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 6px; }
+    .btn-row.mini .action-btn { padding: 5px 2px; font-size: 10.5px; }
     .pane-note { margin: 4px 0 8px; font-size: 10.5px; line-height: 1.4; color: var(--muted); }
 
     @media (max-width: 640px) {
@@ -283,7 +298,7 @@
     <div class="hud-panel" id="hudPanel">
       <div class="hud-header">
         <div>
-          <div class="hud-title">Física Bolsa HDPE</div>
+          <div class="hud-title">Física de la Bolsa</div>
           <div class="hud-subtitle">Lámina Delgada XPBD + Plasticidad</div>
         </div>
         <button class="toggle-btn" id="toggleHudBtn">Ocultar</button>
@@ -358,7 +373,21 @@
 
         <!-- ===== Material ===== -->
         <section class="tab-pane" data-tab="mat" role="tabpanel" hidden>
-          <p class="pane-note">Valores en unidades físicas reales. Los valores por defecto corresponden a una bolsa de supermercado de polietileno (HDPE, ~19 µm).</p>
+          <div class="ctl" style="border-top:none" data-info="Elige un material de la lista para cargar sus valores físicos. Si mueves cualquier valor, pasa a <b>Personalizado</b>. <b>Guardar…</b> lo añade a «Mis materiales» en este navegador; <b>Exportar</b> descarga tus materiales en un archivo JSON que puedes <b>Importar</b> en otro navegador o compartir. Para ver un material desde cero, pulsa <b>Re-simular pose</b> después de elegirlo.">
+            <div class="ctl-head"><label for="selMaterial">Material</label></div>
+            <select id="selMaterial" class="ctl-select"></select>
+            <div class="btn-row mini">
+              <button class="action-btn" id="btnSaveMaterial" title="Guarda los valores actuales con un nombre en «Mis materiales»">Guardar…</button>
+              <button class="action-btn" id="btnDeleteMaterial" disabled title="Elimina el material seleccionado de «Mis materiales»">Eliminar</button>
+              <button class="action-btn" id="btnExportMaterials" title="Descarga tus materiales en un archivo JSON">Exportar</button>
+              <button class="action-btn" id="btnImportMaterials" title="Carga materiales desde un archivo JSON">Importar</button>
+            </div>
+            <input type="file" id="fileMaterials" accept="application/json,.json" hidden />
+          </div>
+          <div class="ctl ctl-check" data-info="Al elegir un material, cambia también el color, la opacidad y el brillo de la bolsa para que se parezca a ese material (pestaña Escena). Desmárcalo para conservar tu aspecto.">
+            <div class="ctl-head"><label for="chkMaterialLook">Aplicar también su aspecto</label><input type="checkbox" id="chkMaterialLook" checked /></div>
+          </div>
+          <div class="section-title">Propiedades (unidades reales)</div>
           <div class="ctl" data-info="Masa por metro cuadrado de la lámina. Bolsa de supermercado ≈ <b>15–20 g/m²</b>; papel de seda 20; papel de oficina 80; algodón 150; lona 350. La gravedad acelera todo igual, pero cuanto <b>más ligera</b>, más la frena el aire y más la empuja el viento. Escala logarítmica.">
             <div class="ctl-head"><label for="sliderDensity">Densidad</label></div>
             <input type="range" id="sliderDensity" min="0.7" max="3.2" step="any" value="1.255" data-log data-unit="g/m²" />
@@ -369,7 +398,7 @@
           </div>
           <div class="ctl" data-info="Cuánto cuesta estirar la lámina: módulo de Young × grosor, en kilonewton por metro. Plásticos y papel: <b>10–200</b> (prácticamente no se estiran); tejidos: 1–10; goma fina: <b>&lt; 1</b> (se estira visiblemente bajo su propio peso). Escala logarítmica.">
             <div class="ctl-head"><label for="sliderStretch">Rigidez a estiramiento</label></div>
-            <input type="range" id="sliderStretch" min="-1.3" max="2.3" step="any" value="1.255" data-log data-unit="kN/m" />
+            <input type="range" id="sliderStretch" min="-1.3" max="2.302" step="any" value="1.255" data-log data-unit="kN/m" />
           </div>
           <div class="ctl" data-info="Plasticidad: qué parte de cada doblez fuerte queda fijada para siempre. <b>0</b> = elástico (tela, goma), recupera su forma; <b>1</b> = los pliegues quedan marcados (plástico, papel, papel de aluminio).">
             <div class="ctl-head"><label for="sliderPlastic">Memoria de pliegues</label></div>

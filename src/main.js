@@ -9,6 +9,7 @@ import { SimHistory } from './history.js';
 import StlWorker from './stlWorker.js?worker&inline';
 import { setupPanel, getControlValue } from './panel.js';
 import { setupAppearance } from './appearance.js';
+import { setupMaterials } from './materials.js';
 
 /**
  * Generates a procedural fine HDPE extrusion-ripple bump texture
@@ -753,10 +754,11 @@ document.getElementById('resSeg').addEventListener('click', (e) => {
 });
 
 setupPanel();
-setupAppearance({
+const appearance = setupAppearance({
   scene, renderer, camera, controls, bagMaterial, floorMesh, floorY: SOLVER_FIXED.floorY,
   hemiLight, keyLight, rimLight, windArrowGroup,
 });
+setupMaterials(appearance);
 buildBag('low');
 
 // 6. Animation Loop

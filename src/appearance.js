@@ -17,6 +17,7 @@ const DEFAULTS = {
   bagColor: '#2d89bd',
   opacity: 0.68,
   shine: 0.88,
+  metal: 0, // 1 = metallic finish (aluminium foil)
   ripples: true,
   arrow: true,
   transparentPng: false,
@@ -174,6 +175,8 @@ export function setupAppearance(ctx) {
     bagMaterial.roughness = 0.05 + (1 - state.shine) * 0.8;
     bagMaterial.clearcoat = state.shine;
     bagMaterial.clearcoatRoughness = 0.05 + (1 - state.shine) * 0.4;
+    bagMaterial.metalness = state.metal ? 0.85 : 0.02;
+    bagMaterial.sheen = state.metal ? 0 : 0.45;
     bagMaterial.bumpScale = state.ripples ? 0.0028 : 0;
     bagMaterial.needsUpdate = true;
   }
@@ -299,4 +302,11 @@ export function setupAppearance(ctx) {
   });
 
   applyAll();
+
+  return {
+    /** Current material look (colour, opacity, shine, metal). */
+    getLook: () => ({ bagColor: state.bagColor, opacity: state.opacity, shine: state.shine, metal: state.metal }),
+    /** Applies a material look (used by the material presets). */
+    setLook: (look) => update({ ...look }),
+  };
 }
