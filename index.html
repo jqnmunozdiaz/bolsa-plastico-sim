@@ -403,6 +403,26 @@
             <div class="ctl-head"><label for="sliderGravity">Gravedad</label></div>
             <input type="range" id="sliderGravity" min="0" max="18" step="0.2" value="9.8" data-unit="m/s²" />
           </div>
+          <div class="ctl" data-info="Inclina la gravedad respecto a la vertical. <b>0°</b> = hacia abajo (normal); <b>90°</b> = de lado, como si la tela estuviera colgada en una pared que gira; <b>180°</b> = hacia arriba (la tela «cae» hacia el techo). El suelo sigue estando abajo. La pose de referencia de la bolsa siempre se forma con la gravedad vertical.">
+            <div class="ctl-head"><label for="sliderGravTilt">Inclinación de la gravedad</label></div>
+            <input type="range" id="sliderGravTilt" min="0" max="180" step="5" value="0" data-unit="°" />
+          </div>
+          <div class="ctl" data-info="Hacia dónde tira la gravedad inclinada, vista desde la cámara inicial: <b>0°</b> = hacia la derecha, <b>90°</b> = hacia el fondo, <b>180°</b> = hacia la izquierda, <b>270°</b> = hacia la cámara. Solo cuenta si la inclinación no es 0.">
+            <div class="ctl-head"><label for="sliderGravAz">Dirección de la gravedad</label></div>
+            <input type="range" id="sliderGravAz" min="0" max="355" step="5" value="0" data-unit="°" />
+          </div>
+          <div class="ctl" data-info="Amortiguación de todo movimiento (viscosidad del aire y rozamiento interno del material), en 1/s. <b>0</b> = sin pérdidas: oscila mucho tiempo; <b>1,7</b> = valor original; <b>alto</b> = movimientos lentos, como en miel, útil para que la tela se asiente rápido (ClothWorks recomienda subirla antes de dejar caer un mantel).">
+            <div class="ctl-head"><label for="sliderViscosity">Viscosidad</label></div>
+            <input type="range" id="sliderViscosity" min="0" max="20" step="0.1" value="1.7" data-unit="1/s" />
+          </div>
+          <div class="ctl" data-info="Precisión de la física. <b>Rápida</b> = 5 subpasos por fotograma (tela algo más elástica, va más fluido en mallas altas); <b>Normal</b> = 7; <b>Alta</b> = 10 subpasos y una pasada extra de estiramiento (tela más firme y estable, pero unas 2–2,5 veces más lenta).">
+            <div class="ctl-head"><span class="ctl-name">Calidad de la simulación</span></div>
+            <div class="seg" id="qualitySeg">
+              <button type="button" data-quality="fast">Rápida</button>
+              <button type="button" data-quality="normal" class="active">Normal</button>
+              <button type="button" data-quality="high">Alta</button>
+            </div>
+          </div>
           <div class="ctl ctl-check" data-info="Impide que el plástico se atraviese a sí mismo al arrugarse. Desactivarla acelera la simulación, pero el STL puede tener caras cruzadas.">
             <div class="ctl-head"><label for="chkSelfCol">Autocolisión</label><input type="checkbox" id="chkSelfCol" checked /></div>
           </div>
@@ -485,6 +505,9 @@
           <div class="ctl" data-info="Cuánto varía el viento. <b>0</b> = flujo constante (la bolsa se queda quieta, inclinada); <b>alto</b> = ráfagas que cambian de fuerza y dirección y hacen flamear el plástico.">
             <div class="ctl-head"><label for="sliderWindTurb">Ráfagas</label></div>
             <input type="range" id="sliderWindTurb" min="0" max="1" step="0.05" value="0.4" />
+          </div>
+          <div class="ctl ctl-check" data-info="Las partes de la tela que quedan detrás de otras (vistas desde donde viene el viento) reciben solo un 25 % del viento, como la cara trasera de una bolsa o los pliegues interiores. Sin sombra, todas las caras reciben el viento completo y la tela se empuja casi el doble.">
+            <div class="ctl-head"><label for="chkWindShadow">Sombra de viento</label><input type="checkbox" id="chkWindShadow" checked /></div>
           </div>
         </section>
 

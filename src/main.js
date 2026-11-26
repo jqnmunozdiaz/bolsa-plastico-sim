@@ -127,6 +127,7 @@ let currentRes = 'low';
 let pinModeId = OBJECTS.bag.pinModes[0].id;
 let collider = null; // obstacle controls + mesh (set up before the first object is built)
 let customPins = new Set(); // fixed vertices chosen by hand (pin mode 'custom')
+let quality = 'normal'; // simulation quality: fast | normal | high
 let mouseTool = 'pull'; // 'pull' = drag the film, 'pin' = click to fix / release points
 let pinClick = null; // pin tool: pointer-down info to tell a click from a drag
 let pinTween = null; // smooth gather / spread of the fixed points
@@ -187,6 +188,10 @@ function readUiParams() {
   const num = (id) => getControlValue(id) * (UNIT[id] ?? 1);
   return {
     gravity: num('sliderGravity'),
+    gravityTilt: num('sliderGravTilt'),
+    gravityAzimuth: num('sliderGravAz'),
+    viscosity: num('sliderViscosity'),
+    windShadow: document.getElementById('chkWindShadow').checked,
     density: num('sliderDensity'),
     bendStiffness: num('sliderBend'),
     stretchStiffness: num('sliderStretch'),
@@ -218,6 +223,7 @@ function buildObject(objKey, resKey) {
   if (objKey !== currentObj || pinModeId === 'custom') pinModeId = obj.pinModes[0].id;
   bagData = obj.build(obj.resolutions[resKey]);
   solver = new XPBDBagSolver(bagData, { ...SOLVER_FIXED, ...readUiParams() });
+  solver.setQuality(quality);
   collider?.attach(solver);
   posAttr = bagData.geometry.attributes.position;
   bagMesh.geometry = bagData.geometry;
@@ -713,6 +719,19 @@ bindSlider('sliderPlastic', 'plasticity');
 bindSlider('sliderDrag', 'dragCoeff');
 bindSlider('sliderPressure', 'pressure');
 bindSlider('sliderGravity', 'gravity');
+bindSlider('sliderGravTilt', 'gravityTilt');
+bindSlider('sliderGravAz', 'gravityAzimuth');
+bindSlider('sliderViscosity', 'viscosity');
+document.getElementById('chkWindShadow').addEventListener('change', (e) => {
+  solver.params.windShadow = e.target.checked;
+});
+document.getElementById('qualitySeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-quality]');
+  if (!b) return;
+  quality = b.dataset.quality;
+  for (const x of document.querySelectorAll('#qualitySeg button')) x.classList.toggle('active', x === b);
+  solver.setQuality(quality);
+});
 
 document.getElementById('chkSelfCol').addEventListener('change', (e) => {
   solver.params.selfCollision = e.target.checked;

@@ -23,6 +23,10 @@ export class XPBDBagSolver {
     // Physics parameters
     this.params = {
       gravity: params.gravity ?? 9.8, // m/s²
+      gravityTilt: params.gravityTilt ?? 0, // degrees away from straight down
+      gravityAzimuth: params.gravityAzimuth ?? 0, // direction of the tilt (same convention as the wind)
+      viscosity: params.viscosity ?? 1.7, // velocity damping, 1/s (1.7 = the original 0.996 per substep)
+      windShadow: params.windShadow ?? true, // parts behind other parts (seen from the wind) get less wind
       // Material, in SI units
       density: params.density ?? 0.018, // areal density, kg/m² (HDPE film ~19 µm)
       bendStiffness: params.bendStiffness ?? 4.9e-6, // bending modulus D = E·t³/12, N·m
@@ -59,7 +63,8 @@ export class XPBDBagSolver {
     // Allow more candidates per hash cell when the mesh is denser
     this.cellCap = Math.round(24 / (edgeRatio * edgeRatio));
     // Gauss-Seidel converges more slowly on finer meshes: add cheap extra stretch passes
-    this.stretchIters = params.stretchIters ?? (edgeRatio < 0.6 ? 3 : edgeRatio < 0.9 ? 2 : 1);
+    this.baseStretchIters = params.stretchIters ?? (edgeRatio < 0.6 ? 3 : edgeRatio < 0.9 ? 2 : 1);
+    this.stretchIters = this.baseStretchIters;
 
     const N = this.numVerts;
     this.restPos = new Float32Array(bagMeshData.positions);
@@ -411,8 +416,10 @@ export class XPBDBagSolver {
         dragCoeff: this.params.dragCoeff,
         pressure: this.params.pressure,
         windSpeed: this.params.windSpeed,
+        gravityTilt: this.params.gravityTilt,
       };
     }
+    this.params.gravityTilt = 0; // and with gravity straight down
     // The reference pose always forms the same way: still air, no aerodynamic damping
     this.params.windSpeed = 0;
     this.params.dragCoeff = 0;
@@ -478,6 +485,7 @@ export class XPBDBagSolver {
     this.params.dragCoeff = this.warmupSaved.dragCoeff;
     this.params.pressure = this.warmupSaved.pressure;
     this.params.windSpeed = this.warmupSaved.windSpeed;
+    this.params.gravityTilt = this.warmupSaved.gravityTilt;
     this.warmup = null;
   }
 
@@ -543,6 +551,7 @@ export class XPBDBagSolver {
     const wpx = Math.sin(az), wpz = Math.cos(az);
     const turb = Math.max(0, Math.min(1, P.windTurbulence));
     const tm = this.time;
+    const shadow = windOn && P.windShadow ? this._windShadow(wdx, wdy, wdz) : null;
 
     for (let t = 0; t < this.numTris; t++) {
       const i0 = this.indices[3 * t];
@@ -581,7 +590,7 @@ export class XPBDBagSolver {
           swing = turb * 0.35 * Math.sin(0.7 * tm + 3 * cy + 1.1);
           lift = turb * 0.25 * Math.sin(1.3 * tm + 4 * cx);
         }
-        const sp = P.windSpeed * gust;
+        const sp = P.windSpeed * gust * (shadow ? shadow[t] : 1);
         const wx = sp * (wdx + swing * wpx);
         const wy = sp * (wdy + lift);
         const wz = sp * (wdz + swing * wpz);
@@ -611,7 +620,12 @@ export class XPBDBagSolver {
       this.vel[3 * i + 2] += impulses[3 * i + 2] * w;
     }
 
-    const g = -this.params.gravity;
+    // Gravity vector: tilted away from straight down towards the azimuth (0° = +X, 90° = -Z)
+    const gt = (P.gravityTilt * Math.PI) / 180, ga = (P.gravityAzimuth * Math.PI) / 180;
+    const gx = P.gravity * Math.sin(gt) * Math.cos(ga);
+    const gy = -P.gravity * Math.cos(gt);
+    const gz = -P.gravity * Math.sin(gt) * Math.sin(ga);
+    const damp = Math.exp(-Math.max(0, P.viscosity) * sdt); // viscous damping per substep
     // XPBD compliances (inverse stiffness) divided by the substep squared
     const stretchAlpha = 1 / (Math.max(1, P.stretchStiffness) * sdt * sdt);
     const bendAlphaScale = 1 / (Math.max(1e-10, P.bendStiffness) * sdt * sdt); // ÷ per-hinge geometry
@@ -636,14 +650,14 @@ export class XPBDBagSolver {
 
         // Gravity, warm-up sculpting and pressure (aerodynamic drag was applied above, per frame)
         const w = this.invMass[i];
-        this.vel[ix] += (this.extForces[ix] + press[ix] * w) * sdt;
-        this.vel[iy] += (g + this.extForces[iy] + press[iy] * w) * sdt;
-        this.vel[iz] += (this.extForces[iz] + press[iz] * w) * sdt;
+        this.vel[ix] += (gx + this.extForces[ix] + press[ix] * w) * sdt;
+        this.vel[iy] += (gy + this.extForces[iy] + press[iy] * w) * sdt;
+        this.vel[iz] += (gz + this.extForces[iz] + press[iz] * w) * sdt;
 
-        // Subtle velocity damping for numerical stability
-        this.vel[ix] *= 0.996;
-        this.vel[iy] *= 0.996;
-        this.vel[iz] *= 0.996;
+        // Viscous damping (air viscosity / internal friction of the material)
+        this.vel[ix] *= damp;
+        this.vel[iy] *= damp;
+        this.vel[iz] *= damp;
 
         this.pos[ix] += this.vel[ix] * sdt;
         this.pos[iy] += this.vel[iy] * sdt;
@@ -974,6 +988,60 @@ export class XPBDBagSolver {
       p[ix + 1] = fyy;
       p[ix + 2] = fz;
     }
+  }
+
+  /**
+   * Simulation quality: 'fast' (5 substeps), 'normal' (7) or 'high' (10 substeps and one more
+   * stretch pass). More substeps = stiffer, more accurate film, but slower.
+   */
+  setQuality(q) {
+    const substeps = { fast: 5, normal: 7, high: 10 }[q] ?? 7;
+    this.params.substeps = substeps;
+    this.stretchIters = this.baseStretchIters + (q === 'high' ? 1 : 0);
+  }
+
+  /**
+   * Wind shadow: looking along the wind, a facet with another part of the film in front of it
+   * (closer to where the wind comes from, on the same line of sight) only gets 25 % of the wind.
+   * Uses a 2.5 cm grid on the plane perpendicular to the wind. Returns a factor per triangle.
+   */
+  _windShadow(dx, dy, dz) {
+    const T = this.numTris, p = this.pos, I = this.indices;
+    // Basis (u, v) perpendicular to the wind direction d
+    let ux = -dz, uy = 0, uz = dx; // d x up
+    let ul = Math.hypot(ux, uy, uz);
+    if (ul < 1e-6) { ux = 1; uy = 0; uz = 0; ul = 1; } // wind straight up or down
+    ux /= ul; uy /= ul; uz /= ul;
+    const vx = dy * uz - dz * uy, vy = dz * ux - dx * uz, vz = dx * uy - dy * ux;
+    const proj = this._shadowProj ?? (this._shadowProj = new Float32Array(3 * T));
+    let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity;
+    for (let t = 0; t < T; t++) {
+      const a = 3 * I[3 * t], b = 3 * I[3 * t + 1], c = 3 * I[3 * t + 2];
+      const cx = (p[a] + p[b] + p[c]) / 3, cy = (p[a + 1] + p[b + 1] + p[c + 1]) / 3, cz = (p[a + 2] + p[b + 2] + p[c + 2]) / 3;
+      const pu = cx * ux + cy * uy + cz * uz, pv = cx * vx + cy * vy + cz * vz;
+      proj[3 * t] = pu; proj[3 * t + 1] = pv; proj[3 * t + 2] = cx * dx + cy * dy + cz * dz;
+      if (pu < umin) umin = pu; if (pu > umax) umax = pu;
+      if (pv < vmin) vmin = pv; if (pv > vmax) vmax = pv;
+    }
+    const cell = 0.025;
+    const cols = Math.min(160, Math.floor((umax - umin) / cell) + 1);
+    const rows = Math.min(160, Math.floor((vmax - vmin) / cell) + 1);
+    const size = cols * rows;
+    if (!this._shadowGrid || this._shadowGrid.length < size) this._shadowGrid = new Float32Array(size);
+    const grid = this._shadowGrid;
+    grid.fill(Infinity, 0, size);
+    const cellOf = (t) => {
+      const ci = Math.min(cols - 1, Math.floor((proj[3 * t] - umin) / cell));
+      const cj = Math.min(rows - 1, Math.floor((proj[3 * t + 1] - vmin) / cell));
+      return cj * cols + ci;
+    };
+    for (let t = 0; t < T; t++) {
+      const k = cellOf(t);
+      if (proj[3 * t + 2] < grid[k]) grid[k] = proj[3 * t + 2];
+    }
+    const out = this._shadowOut ?? (this._shadowOut = new Float32Array(T));
+    for (let t = 0; t < T; t++) out[t] = proj[3 * t + 2] > grid[cellOf(t)] + 0.015 ? 0.25 : 1;
+    return out;
   }
 
   _solveBending(alphaScale) {
