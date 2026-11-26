@@ -7,7 +7,7 @@ import { solidifyShell } from './solidify.js';
 import { writeBinaryStl } from './printable.js';
 import { SimHistory } from './history.js';
 import StlWorker from './stlWorker.js?worker&inline';
-import { setupPanel } from './panel.js';
+import { setupPanel, getControlValue } from './panel.js';
 import { setupAppearance } from './appearance.js';
 
 /**
@@ -173,14 +173,24 @@ const wireMesh = new THREE.Mesh(bagMesh.geometry, wireMat);
 wireMesh.visible = false;
 scene.add(wireMesh);
 
+// Material sliders are shown in friendly units; the solver works in SI units
+const UNIT = {
+  sliderDensity: 1e-3, // g/m² -> kg/m²
+  sliderBend: 1e-6, // µN·m -> N·m
+  sliderStretch: 1e3, // kN/m -> N/m
+};
+
 function readUiParams() {
-  const num = (id) => parseFloat(document.getElementById(id).value);
+  const num = (id) => getControlValue(id) * (UNIT[id] ?? 1);
   return {
     gravity: num('sliderGravity'),
-    bendingCompliance: num('sliderBend'),
+    density: num('sliderDensity'),
+    bendStiffness: num('sliderBend'),
+    stretchStiffness: num('sliderStretch'),
     plasticity: num('sliderPlastic'),
-    airDrag: num('sliderDrag'),
-    airPressure: num('sliderPressure'),
+    dragCoeff: num('sliderDrag'),
+    pressure: num('sliderPressure'),
+    friction: num('sliderFriction'),
     windSpeed: num('sliderWind'),
     windAzimuth: num('sliderWindDir'),
     windElevation: num('sliderWindElev'),
@@ -631,13 +641,16 @@ sliderSpeed.addEventListener('input', () => {
 
 function bindSlider(id, paramKey) {
   const slider = document.getElementById(id);
-  slider.addEventListener('input', () => solver.setParam(paramKey, parseFloat(slider.value)));
+  slider.addEventListener('input', () => solver.setParam(paramKey, getControlValue(id) * (UNIT[id] ?? 1)));
 }
 
-bindSlider('sliderBend', 'bendingCompliance');
+bindSlider('sliderDensity', 'density');
+bindSlider('sliderBend', 'bendStiffness');
+bindSlider('sliderStretch', 'stretchStiffness');
+bindSlider('sliderFriction', 'friction');
 bindSlider('sliderPlastic', 'plasticity');
-bindSlider('sliderDrag', 'airDrag');
-bindSlider('sliderPressure', 'airPressure');
+bindSlider('sliderDrag', 'dragCoeff');
+bindSlider('sliderPressure', 'pressure');
 bindSlider('sliderGravity', 'gravity');
 
 document.getElementById('chkSelfCol').addEventListener('change', (e) => {
@@ -699,13 +712,13 @@ function updateWindUi() {
   const az = parseFloat(sliderWindDir.value);
   const el = parseFloat(sliderWindElev.value);
   document.getElementById('windSpeedHint').textContent =
-    speed === 0 ? 'sin viento' : speed < 5 ? 'brisa' : speed < 9 ? 'moderado' : 'fuerte';
+    speed === 0 ? 'sin viento' : speed < 1 ? 'brisa suave' : speed < 3 ? 'brisa' : speed < 7 ? 'viento fuerte' : 'temporal';
   document.getElementById('windDirHint').textContent = `hacia ${DIR_NAMES[Math.round(az / 45) % 8]}`;
 
   const a = (az * Math.PI) / 180;
   const e = (el * Math.PI) / 180;
   const dir = new THREE.Vector3(Math.cos(e) * Math.cos(a), Math.sin(e), -Math.cos(e) * Math.sin(a));
-  const len = 0.08 + speed * 0.012;
+  const len = 0.08 + Math.min(speed, 12) * 0.015;
   // Placed upwind of the bag, pointing at it
   windArrow.position.set(0, 0.3, 0).addScaledVector(dir, -(0.3 + len));
   windArrow.setDirection(dir);

@@ -70,7 +70,7 @@ export class SimHistory {
       const v = this.tips[k];
       const pinned = buf[this.off.pin + k] > 0.5;
       s.pinned[v] = pinned ? 1 : 0;
-      s.invMass[v] = pinned ? 0 : 1;
+      s.invMass[v] = pinned ? 0 : s.baseInvMass[v];
       s.pinTarget[3 * v] = buf[this.off.pinT + 3 * k];
       s.pinTarget[3 * v + 1] = buf[this.off.pinT + 3 * k + 1];
       s.pinTarget[3 * v + 2] = buf[this.off.pinT + 3 * k + 2];

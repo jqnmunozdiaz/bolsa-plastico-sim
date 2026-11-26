@@ -19,12 +19,15 @@ export class XPBDBagSolver {
 
     // Physics parameters
     this.params = {
-      gravity: params.gravity ?? 9.8,
-      stretchCompliance: params.stretchCompliance ?? 2e-6,
-      bendingCompliance: params.bendingCompliance ?? 0.22, // mapped to XPBD alpha
-      plasticity: params.plasticity ?? 0.68,
-      airDrag: params.airDrag ?? 0.55,
-      airPressure: params.airPressure ?? 0.18,
+      gravity: params.gravity ?? 9.8, // m/s²
+      // Material, in SI units
+      density: params.density ?? 0.018, // areal density, kg/m² (HDPE film ~19 µm)
+      bendStiffness: params.bendStiffness ?? 4.9e-6, // bending modulus D = E·t³/12, N·m
+      stretchStiffness: params.stretchStiffness ?? 18000, // in-plane stiffness E·t, N/m
+      plasticity: params.plasticity ?? 0.68, // 0..1 share of each excess fold that becomes permanent
+      dragCoeff: params.dragCoeff ?? 1.0, // aerodynamic drag coefficient Cd of each facet
+      pressure: params.pressure ?? 0, // overpressure inside the bag body, Pa
+      friction: params.friction ?? 0.3, // floor friction 0..1
       selfCollision: params.selfCollision ?? true,
       thickness: params.thickness ?? 0.0085,
       floorY: params.floorY ?? -0.06,
@@ -38,12 +41,10 @@ export class XPBDBagSolver {
     };
     this.time = 0; // simulated seconds (drives the wind gusts)
 
-    // Resolution normalisation (reference mesh: nx = 24, nv = 40).
-    // Every vertex has unit mass, so with a finer mesh each vertex carries less film area:
-    // scale aerodynamic forces by N / N_ref so drag & pressure feel the same at any resolution.
+    // Masses, forces and stiffnesses come from physical units, so they are resolution independent.
+    // A few numerical settings still depend on the edge length (reference mesh: nx = 24, nv = 40).
     const dims = bagMeshData.dimensions;
     const edgeRatio = Math.sqrt((24 * 40) / (dims.nx * dims.nv)); // ~ edge length / reference edge length
-    this.aeroScale = 1 / (edgeRatio * edgeRatio);
     // Smaller hinges see smaller angles for the same curvature -> lower the plastic yield angle
     this.yieldAngle = 0.26 * edgeRatio;
     // Allow more candidates per hash cell when the mesh is denser
@@ -60,8 +61,17 @@ export class XPBDBagSolver {
     this.pinned = new Uint8Array(N);
     this.pinTarget = new Float32Array(N * 3);
 
-    // Uniform light mass (approx 8g bag -> 1.0 normalized unit per vertex)
-    this.invMass.fill(1.0);
+    // Film area carried by each vertex (a third of each adjacent triangle, at rest)
+    this.vertArea = new Float64Array(N);
+    for (let t = 0; t < this.numTris; t++) {
+      const a = this.indices[3 * t], b = this.indices[3 * t + 1], c = this.indices[3 * t + 2];
+      const A = this._triArea(this.restPos, a, b, c);
+      this.vertArea[a] += A / 3;
+      this.vertArea[b] += A / 3;
+      this.vertArea[c] += A / 3;
+    }
+    this.baseInvMass = new Float32Array(N);
+    this.updateMasses();
 
     // Precompute stretch edges & rest lengths
     const edges = bagMeshData.stretchEdges;
@@ -90,6 +100,7 @@ export class XPBDBagSolver {
     this.bendI3 = new Int32Array(this.numBending);
     this.bendRestAngle = new Float32Array(this.numBending);
     this.bendInitialAngle = new Float32Array(this.numBending);
+    this.bendGeom = new Float32Array(this.numBending);
 
     for (let i = 0; i < this.numBending; i++) {
       const [i0, i1, i2, i3] = hinges[i];
@@ -100,6 +111,12 @@ export class XPBDBagSolver {
       const ang = this._computeDihedralAngle(this.restPos, i0, i1, i2, i3);
       this.bendRestAngle[i] = ang;
       this.bendInitialAngle[i] = ang;
+      // Discrete-shell hinge stiffness: k = D · 3|e|² / (A1 + A2)  (Grinspun et al.)
+      const ex = this.restPos[3 * i1] - this.restPos[3 * i0];
+      const ey = this.restPos[3 * i1 + 1] - this.restPos[3 * i0 + 1];
+      const ez = this.restPos[3 * i1 + 2] - this.restPos[3 * i0 + 2];
+      const areas = this._triArea(this.restPos, i0, i1, i2) + this._triArea(this.restPos, i0, i1, i3);
+      this.bendGeom[i] = areas > 1e-12 ? (3 * (ex * ex + ey * ey + ez * ez)) / areas : 0;
     }
 
     // Build 1-ring + 2-ring adjacency sets for self-collision exclusion
@@ -188,10 +205,31 @@ export class XPBDBagSolver {
     return Math.atan2(sinT, cosT);
   }
 
+  _triArea(p, a, b, c) {
+    const ux = p[3 * b] - p[3 * a], uy = p[3 * b + 1] - p[3 * a + 1], uz = p[3 * b + 2] - p[3 * a + 2];
+    const vx = p[3 * c] - p[3 * a], vy = p[3 * c + 1] - p[3 * a + 1], vz = p[3 * c + 2] - p[3 * a + 2];
+    const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+    return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+  }
+
+  /** Vertex masses from the areal density (pinned vertices keep zero inverse mass). */
+  updateMasses() {
+    const rho = Math.max(1e-4, this.params.density);
+    let mean = 0;
+    for (let i = 0; i < this.numVerts; i++) mean += this.vertArea[i];
+    mean /= this.numVerts;
+    for (let i = 0; i < this.numVerts; i++) {
+      const A = this.vertArea[i] > 0 ? this.vertArea[i] : mean;
+      this.baseInvMass[i] = 1 / (rho * A);
+      this.invMass[i] = this.pinned[i] ? 0 : this.baseInvMass[i];
+    }
+  }
+
   /** Sets a UI parameter; during warm-up, air settings are stored and applied when it ends. */
   setParam(key, value) {
     if (this.warmup && key in this.warmupSaved) this.warmupSaved[key] = value;
     else this.params[key] = value;
+    if (key === 'density') this.updateMasses();
   }
 
   resetFlat() {
@@ -210,7 +248,7 @@ export class XPBDBagSolver {
 
   clearPins() {
     this.pinned.fill(0);
-    this.invMass.fill(1.0);
+    this.invMass.set(this.baseInvMass);
   }
 
   pinHandles(leftOffset, rightOffset) {
@@ -292,14 +330,15 @@ export class XPBDBagSolver {
     // If a warm-up was already running, keep the user's original values
     if (!this.warmup) {
       this.warmupSaved = {
-        airDrag: this.params.airDrag,
-        airPressure: this.params.airPressure,
+        dragCoeff: this.params.dragCoeff,
+        pressure: this.params.pressure,
         windSpeed: this.params.windSpeed,
       };
     }
-    this.params.windSpeed = 0; // the reference pose always forms in still air
-    this.params.airDrag = 0.72;
-    this.params.airPressure = -0.06; // Slight deflation during crease formation
+    // The reference pose always forms the same way: still air, no aerodynamic damping
+    this.params.windSpeed = 0;
+    this.params.dragCoeff = 0;
+    this.params.pressure = 0;
     this.warmup = { step: 0, total: steps };
   }
 
@@ -358,8 +397,8 @@ export class XPBDBagSolver {
   cancelReferencePose() {
     if (!this.warmup) return;
     this.extForces.fill(0);
-    this.params.airDrag = this.warmupSaved.airDrag;
-    this.params.airPressure = this.warmupSaved.airPressure;
+    this.params.dragCoeff = this.warmupSaved.dragCoeff;
+    this.params.pressure = this.warmupSaved.pressure;
     this.params.windSpeed = this.warmupSaved.windSpeed;
     this.warmup = null;
   }
@@ -380,7 +419,7 @@ export class XPBDBagSolver {
           }
         } else if (!want && this.pinned[i]) {
           this.pinned[i] = 0;
-          this.invMass[i] = 1;
+          this.invMass[i] = this.baseInvMass[i];
         }
         this.vel[3 * i] = this.vel[3 * i + 1] = this.vel[3 * i + 2] = 0;
       }
@@ -430,18 +469,19 @@ export class XPBDBagSolver {
     const sdt = dt / substeps;
     const N = this.numVerts;
 
-    // Precompute aerodynamic & pressure forces once per frame
-    const aeroForces = this.aeroForces;
-    aeroForces.fill(0);
-    const dragK = this.params.airDrag * 18.0 * this.aeroScale;
-    const pressK = this.params.airPressure * 2.2 * this.aeroScale;
-    const H = this.dimensions.H;
-
-    // Wind: pushes each triangle along its normal while the film moves slower than the air
-    // (saturating pressure model, so it never pumps energy into film already moving with the wind)
+    // Aerodynamics, once per frame, as impulses (N·s) per vertex:
+    //  - Drag of each facet against the air (still air or wind), normal to the facet:
+    //    F = ½ ρ_air Cd A v_rel|v_rel|. Integrated implicitly over the frame
+    //    (v' = v / (1 + k|v|dt), k = ½ ρ_air Cd / ρ_film) so it is stable even for very light film.
+    //  - Internal overpressure p (Pa) on the bag body: F = p A along the facet normal.
+    const impulses = this.aeroForces;
+    impulses.fill(0);
     const P = this.params;
-    const windOn = P.windSpeed > 0.01 && P.airDrag >= 0;
-    const windK = 2000 * this.aeroScale; // ~10 m/s² on a panel facing a 5 m/s wind (any resolution)
+    const rhoFilm = Math.max(1e-4, P.density);
+    const kDrag = (0.5 * 1.2 * Math.max(0, P.dragCoeff)) / rhoFilm; // 1/m
+    const pressure = P.pressure;
+    const H = this.dimensions.H;
+    const windOn = P.windSpeed > 0.01;
     const az = (P.windAzimuth * Math.PI) / 180;
     const el = (P.windElevation * Math.PI) / 180;
     // Azimuth 0° = towards +X (right), 90° = towards -Z (away from the default camera)
@@ -473,12 +513,11 @@ export class XPBDBagSolver {
       const vz = (this.vel[3 * i0 + 2] + this.vel[3 * i1 + 2] + this.vel[3 * i2 + 2]) / 3;
 
       const vn = vx * nx + vy * ny + vz * nz;
-      const dragMag = -dragK * area * (vn * Math.abs(vn) + 0.25 * vn);
 
-      // Gentle internal air puff mostly in the bag body (below handles)
+      // Internal pressure acts on the bag body (below the handles)
       const avgY = (y0 + this.pos[3 * i1 + 1] + this.pos[3 * i2 + 1]) / 3;
       const bodyMask = Math.max(0, 1 - Math.pow(avgY / (H * 0.72), 2));
-      let windMag = 0;
+      let wn = 0; // air velocity along the normal
       if (windOn) {
         const cx = (x0 * 3 + e1x + e2x) / 3, cy = avgY, cz = (z0 * 3 + e1z + e2z) / 3;
         let gust = 1, swing = 0, lift = 0;
@@ -494,24 +533,30 @@ export class XPBDBagSolver {
         const wx = sp * (wdx + swing * wpx);
         const wy = sp * (wdy + lift);
         const wz = sp * (wdz + swing * wpz);
-        const wn = wx * nx + wy * ny + wz * nz;
-        const sgn = wn >= 0 ? 1 : -1;
-        const push = sgn * (wn - vn); // how much faster the air is than the film, along the normal
-        if (push > 0) windMag = sgn * windK * area * push * push;
+        wn = wx * nx + wy * ny + wz * nz;
       }
-      const fMag = (dragMag + pressK * area * bodyMask + windMag) / 3;
-
-      const fx = fMag * nx, fy = fMag * ny, fz = fMag * nz;
-      aeroForces[3 * i0] += fx; aeroForces[3 * i0 + 1] += fy; aeroForces[3 * i0 + 2] += fz;
-      aeroForces[3 * i1] += fx; aeroForces[3 * i1 + 1] += fy; aeroForces[3 * i1 + 2] += fz;
-      aeroForces[3 * i2] += fx; aeroForces[3 * i2 + 1] += fy; aeroForces[3 * i2 + 2] += fz;
+      const vrel = vn - wn; // film speed relative to the air, along the normal
+      const dvn = -vrel * (1 - 1 / (1 + kDrag * Math.abs(vrel) * dt)); // implicit quadratic drag
+      // Impulse on the facet (its film mass times the velocity change) plus the pressure push
+      const J = (rhoFilm * area * dvn + pressure * area * bodyMask * dt) / 3;
+      if (J === 0) continue;
+      const jx = J * nx, jy = J * ny, jz = J * nz;
+      impulses[3 * i0] += jx; impulses[3 * i0 + 1] += jy; impulses[3 * i0 + 2] += jz;
+      impulses[3 * i1] += jx; impulses[3 * i1 + 1] += jy; impulses[3 * i1 + 2] += jz;
+      impulses[3 * i2] += jx; impulses[3 * i2 + 1] += jy; impulses[3 * i2 + 2] += jz;
+    }
+    for (let i = 0; i < N; i++) {
+      const w = this.invMass[i];
+      if (w === 0) continue;
+      this.vel[3 * i] += impulses[3 * i] * w;
+      this.vel[3 * i + 1] += impulses[3 * i + 1] * w;
+      this.vel[3 * i + 2] += impulses[3 * i + 2] * w;
     }
 
     const g = -this.params.gravity;
-    const stretchAlpha = this.params.stretchCompliance / (sdt * sdt);
-    // Map UI bending slider [0.01..1.0] to XPBD compliance (lower slider = softer)
-    const bendStiff = Math.max(0.005, this.params.bendingCompliance);
-    const bendAlpha = (0.0008 / (bendStiff * bendStiff)) / (sdt * sdt);
+    // XPBD compliances (inverse stiffness) divided by the substep squared
+    const stretchAlpha = 1 / (Math.max(1, P.stretchStiffness) * sdt * sdt);
+    const bendAlphaScale = 1 / (Math.max(1e-10, P.bendStiffness) * sdt * sdt); // ÷ per-hinge geometry
 
     for (let step = 0; step < substeps; step++) {
       // 1. Integrate velocities & predict positions
@@ -531,10 +576,10 @@ export class XPBDBagSolver {
         this.prevPos[iy] = this.pos[iy];
         this.prevPos[iz] = this.pos[iz];
 
-        const im = this.invMass[i];
-        this.vel[ix] += (aeroForces[ix] + this.extForces[ix]) * im * sdt;
-        this.vel[iy] += (g + (aeroForces[iy] + this.extForces[iy]) * im) * sdt;
-        this.vel[iz] += (aeroForces[iz] + this.extForces[iz]) * im * sdt;
+        // Gravity + warm-up sculpting accelerations (aerodynamics were applied above, per frame)
+        this.vel[ix] += this.extForces[ix] * sdt;
+        this.vel[iy] += (g + this.extForces[iy]) * sdt;
+        this.vel[iz] += this.extForces[iz] * sdt;
 
         // Subtle velocity damping for numerical stability
         this.vel[ix] *= 0.996;
@@ -621,18 +666,19 @@ export class XPBDBagSolver {
       }
 
       // 3. Solve Dihedral Bending Constraints
-      this._solveBending(bendAlpha);
+      this._solveBending(bendAlphaScale);
 
       // 4. Floor Collision
       const floorY = this.params.floorY;
+      const keep = 1 - Math.max(0, Math.min(1, P.friction)); // share of sliding motion kept
       for (let i = 0; i < N; i++) {
         if (this.pinned[i]) continue;
         const iy = 3 * i + 1;
         if (this.pos[iy] < floorY) {
           this.pos[iy] = floorY;
           // Floor friction
-          this.pos[3 * i] = this.prevPos[3 * i] + (this.pos[3 * i] - this.prevPos[3 * i]) * 0.7;
-          this.pos[3 * i + 2] = this.prevPos[3 * i + 2] + (this.pos[3 * i + 2] - this.prevPos[3 * i + 2]) * 0.7;
+          this.pos[3 * i] = this.prevPos[3 * i] + (this.pos[3 * i] - this.prevPos[3 * i]) * keep;
+          this.pos[3 * i + 2] = this.prevPos[3 * i + 2] + (this.pos[3 * i + 2] - this.prevPos[3 * i + 2]) * keep;
         }
       }
 
@@ -699,9 +745,12 @@ export class XPBDBagSolver {
     }
   }
 
-  _solveBending(alpha) {
+  _solveBending(alphaScale) {
     const p = this.pos;
     for (let h = 0; h < this.numBending; h++) {
+      const geom = this.bendGeom[h];
+      if (geom === 0) continue;
+      const alpha = alphaScale / geom;
       const i0 = this.bendI0[h];
       const i1 = this.bendI1[h];
       const i2 = this.bendI2[h];
@@ -747,6 +796,8 @@ export class XPBDBagSolver {
       if (C > Math.PI) C -= 2 * Math.PI;
       if (C < -Math.PI) C += 2 * Math.PI;
       if (Math.abs(C) < 1e-4) continue;
+      if (C > 0.8) C = 0.8; // limit a single correction for stability
+      else if (C < -0.8) C = -0.8;
 
       // Exact dihedral angle gradients (Bridson et al.)
       // Moving i2 in +n1 or i3 in +n2 decreases theta, so gradients are -n1/h2 and -n2/h3
@@ -776,8 +827,7 @@ export class XPBDBagSolver {
         alpha;
 
       if (denom < 1e-10) continue;
-      // Clamp correction for stability
-      const dLambda = Math.max(-0.5, Math.min(0.5, -C / denom));
+      const dLambda = -C / denom;
 
       if (w0 > 0) { p[3 * i0] += w0 * dLambda * q0x; p[3 * i0 + 1] += w0 * dLambda * q0y; p[3 * i0 + 2] += w0 * dLambda * q0z; }
       if (w1 > 0) { p[3 * i1] += w1 * dLambda * q1x; p[3 * i1 + 1] += w1 * dLambda * q1y; p[3 * i1 + 2] += w1 * dLambda * q1z; }

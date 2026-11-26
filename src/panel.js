@@ -23,11 +23,31 @@ function el(tag, className, attrs = {}) {
   return e;
 }
 
-/** Sets a slider from code and notifies every listener (simulation, number field, reset button). */
+const isLog = (slider) => slider.dataset.log !== undefined;
+
+/**
+ * Value of a slider in its real units. Sliders marked data-log store log10 of the value,
+ * so a wide range (e.g. 0.1 to 3000) gets the same resolution everywhere.
+ */
+export function getControlValue(id) {
+  const slider = document.getElementById(id);
+  const v = parseFloat(slider.value);
+  return isLog(slider) ? 10 ** v : v;
+}
+
+/** Sets a slider (in real units) from code and notifies every listener. */
 export function setControlValue(id, value) {
   const slider = document.getElementById(id);
-  slider.value = String(value);
+  slider.value = String(isLog(slider) ? Math.log10(value) : value);
   slider.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** 3 significant digits, without exponent notation (for log-scale values). */
+function fmtSig(v) {
+  if (v >= 100) return v.toFixed(0);
+  if (v >= 10) return v.toFixed(1);
+  if (v >= 1) return v.toFixed(2);
+  return v.toPrecision(2);
 }
 
 function setupTabs(root) {
@@ -87,19 +107,22 @@ function setupSlider(row) {
   const slider = row.querySelector('input[type="range"]');
   if (!slider || slider.dataset.plain !== undefined) return;
   const head = row.querySelector('.ctl-head');
+  const log = isLog(slider);
   const min = parseFloat(slider.min);
   const max = parseFloat(slider.max);
-  const step = parseFloat(slider.step) || 1;
-  const dec = decimalsOf(slider.step || 1);
-  const def = parseFloat(slider.defaultValue);
-  const fmt = (v) => v.toFixed(dec);
+  const step = slider.step === 'any' ? 0 : parseFloat(slider.step) || 1; // 0 = continuous
+  const dec = step ? decimalsOf(slider.step || 1) : 2;
+  const def = parseFloat(slider.defaultValue); // in slider units (log10 for log sliders)
+  const toReal = (v) => (log ? 10 ** v : v);
+  const toSlider = (r) => (log ? Math.log10(r) : r);
+  const fmt = (v) => (log ? fmtSig(toReal(v)) : v.toFixed(dec)); // v in slider units
 
   const right = el('span', 'ctl-right');
   const num = el('input', 'ctl-num', {
     type: 'number',
-    min: slider.min,
-    max: slider.max,
-    step: slider.step,
+    min: log ? fmtSig(toReal(min)) : slider.min,
+    max: log ? fmtSig(toReal(max)) : slider.max,
+    step: step ? slider.step : 'any',
     inputmode: 'decimal',
     'aria-label': head.querySelector('label')?.textContent.trim() ?? slider.id,
   });
@@ -119,20 +142,24 @@ function setupSlider(row) {
   const refresh = () => {
     const v = parseFloat(slider.value);
     if (document.activeElement !== num) num.value = fmt(v);
-    reset.classList.toggle('visible', Math.abs(v - def) > step / 2);
+    reset.classList.toggle('visible', Math.abs(v - def) > (step ? step / 2 : 1e-4));
   };
   slider.addEventListener('input', refresh);
 
   const commit = () => {
-    let v = parseFloat(num.value);
-    if (!Number.isFinite(v)) {
+    const typed = parseFloat(num.value);
+    if (!Number.isFinite(typed) || (log && typed <= 0)) {
       num.value = fmt(parseFloat(slider.value));
       return;
     }
+    let v = toSlider(typed);
     v = Math.min(max, Math.max(min, v));
-    v = min + Math.round((v - min) / step) * step; // snap to the slider's grid
+    if (step) v = min + Math.round((v - min) / step) * step; // snap to the slider's grid
     num.value = fmt(v);
-    if (fmt(v) !== fmt(parseFloat(slider.value))) setControlValue(slider.id, fmt(v));
+    if (Math.abs(v - parseFloat(slider.value)) > (step ? step / 4 : 1e-9)) {
+      slider.value = String(v);
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   };
   num.addEventListener('change', commit);
   num.addEventListener('keydown', (e) => {
@@ -145,7 +172,10 @@ function setupSlider(row) {
   num.addEventListener('blur', () => {
     num.value = fmt(parseFloat(slider.value));
   });
-  reset.addEventListener('click', () => setControlValue(slider.id, def));
+  reset.addEventListener('click', () => {
+    slider.value = String(def);
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+  });
   refresh();
 }
 

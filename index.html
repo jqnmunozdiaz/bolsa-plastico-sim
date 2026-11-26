@@ -358,29 +358,42 @@
 
         <!-- ===== Material ===== -->
         <section class="tab-pane" data-tab="mat" role="tabpanel" hidden>
-          <div class="ctl" data-info="Resistencia de la lámina a doblarse. <b>Bajo</b> = film fino de supermercado con muchas arrugas pequeñas; <b>alto</b> = plástico grueso que forma curvas suaves.">
-            <div class="ctl-head"><label for="sliderBend">Rigidez de doblez</label></div>
-            <input type="range" id="sliderBend" min="0.01" max="1.0" step="0.01" value="0.06" />
+          <p class="pane-note">Valores en unidades físicas reales. Los valores por defecto corresponden a una bolsa de supermercado de polietileno (HDPE, ~19 µm).</p>
+          <div class="ctl" data-info="Masa por metro cuadrado de la lámina. Bolsa de supermercado ≈ <b>15–20 g/m²</b>; papel de seda 20; papel de oficina 80; algodón 150; lona 350. La gravedad acelera todo igual, pero cuanto <b>más ligera</b>, más la frena el aire y más la empuja el viento. Escala logarítmica.">
+            <div class="ctl-head"><label for="sliderDensity">Densidad</label></div>
+            <input type="range" id="sliderDensity" min="0.7" max="3.2" step="any" value="1.255" data-log data-unit="g/m²" />
           </div>
-          <div class="ctl" data-info="Plasticidad: cuánto de cada doblez queda fijado para siempre. <b>0</b> = elástico, recupera su forma; <b>1</b> = los pliegues quedan marcados como en una bolsa real.">
+          <div class="ctl" data-info="Resistencia a doblarse: módulo de flexión <b>D = E·t³/12</b>, en micronewton·metro. Film de bolsa ≈ <b>1–10</b>; seda ≈ 1; algodón 10–50; papel 200–500; cartulina &gt; 1000. <b>Bajo</b> = muchas arrugas pequeñas; <b>alto</b> = curvas amplias. Escala logarítmica.">
+            <div class="ctl-head"><label for="sliderBend">Rigidez a flexión</label></div>
+            <input type="range" id="sliderBend" min="-1.3" max="3.5" step="any" value="0.690" data-log data-unit="µN·m" />
+          </div>
+          <div class="ctl" data-info="Cuánto cuesta estirar la lámina: módulo de Young × grosor, en kilonewton por metro. Plásticos y papel: <b>10–200</b> (prácticamente no se estiran); tejidos: 1–10; goma fina: <b>&lt; 1</b> (se estira visiblemente bajo su propio peso). Escala logarítmica.">
+            <div class="ctl-head"><label for="sliderStretch">Rigidez a estiramiento</label></div>
+            <input type="range" id="sliderStretch" min="-1.3" max="2.3" step="any" value="1.255" data-log data-unit="kN/m" />
+          </div>
+          <div class="ctl" data-info="Plasticidad: qué parte de cada doblez fuerte queda fijada para siempre. <b>0</b> = elástico (tela, goma), recupera su forma; <b>1</b> = los pliegues quedan marcados (plástico, papel, papel de aluminio).">
             <div class="ctl-head"><label for="sliderPlastic">Memoria de pliegues</label></div>
             <input type="range" id="sliderPlastic" min="0.0" max="1.0" step="0.02" value="0.88" />
           </div>
-          <div class="ctl" data-info="Frenado aerodinámico sobre cada triángulo. <b>Alto</b> = la bolsa cae más despacio; <b>0</b> = cae como en el vacío. (Efecto todavía débil: se recalibrará con unidades físicas reales.)">
-            <div class="ctl-head"><label for="sliderDrag">Resistencia del aire</label></div>
-            <input type="range" id="sliderDrag" min="0.0" max="1.5" step="0.05" value="0.55" />
+          <div class="ctl" data-info="Coeficiente de arrastre aerodinámico de cada trozo de lámina (placa plana ≈ 1–1,2). Con la densidad decide cuánto frena el aire: una bolsa ligera cae a ~1–2 m/s y flota al moverse. <b>0</b> = vacío: sin frenado y sin efecto del viento.">
+            <div class="ctl-head"><label for="sliderDrag">Coef. de arrastre (Cd)</label></div>
+            <input type="range" id="sliderDrag" min="0" max="2" step="0.05" value="1.0" />
           </div>
-          <div class="ctl" data-info="Aire atrapado en el cuerpo de la bolsa. <b>Positivo</b> la hincha y alisa las arrugas; <b>negativo</b> la desinfla. (Efecto todavía débil: se recalibrará con unidades físicas reales.)">
+          <div class="ctl" data-info="Sobrepresión del aire dentro del cuerpo de la bolsa, en pascales. <b>0,2–1 Pa</b> basta para hincharla y alisar las arrugas; <b>negativo</b> la desinfla y la hace colapsar.">
             <div class="ctl-head"><label for="sliderPressure">Presión interna</label></div>
-            <input type="range" id="sliderPressure" min="-0.3" max="0.8" step="0.02" value="0.00" />
+            <input type="range" id="sliderPressure" min="-0.5" max="2" step="0.05" value="0" data-unit="Pa" />
+          </div>
+          <div class="ctl" data-info="Rozamiento con el suelo. <b>0</b> = desliza como sobre hielo; <b>1</b> = se queda pegada donde toca.">
+            <div class="ctl-head"><label for="sliderFriction">Fricción con el suelo</label></div>
+            <input type="range" id="sliderFriction" min="0" max="1" step="0.05" value="0.3" />
           </div>
         </section>
 
         <!-- ===== Viento ===== -->
         <section class="tab-pane" data-tab="wind" role="tabpanel" hidden>
-          <div class="ctl" data-info="Velocidad del viento constante. <b>2–4 m/s</b> = brisa que mece la bolsa; <b>8–15 m/s</b> = viento fuerte que la levanta y la hace flamear. La flecha azul en la escena muestra hacia dónde sopla.">
+          <div class="ctl" data-info="Velocidad del viento. Una bolsa de plástico es tan ligera que <b>0,5–1 m/s</b> ya la mece y <b>2–3 m/s</b> la pone casi horizontal; un material más pesado (papel, lona) necesita más. La fuerza es el arrastre aerodinámico real, así que depende de la densidad y del Cd (pestaña Material). La flecha azul muestra hacia dónde sopla.">
             <div class="ctl-head"><label for="sliderWind">Velocidad</label><span class="ctl-hint" id="windSpeedHint"></span></div>
-            <input type="range" id="sliderWind" min="0" max="15" step="0.5" value="0" data-unit="m/s" />
+            <input type="range" id="sliderWind" min="0" max="12" step="0.1" value="0" data-unit="m/s" />
           </div>
           <div class="ctl" data-info="Hacia dónde sopla, visto desde la cámara inicial: <b>0°</b> = hacia la derecha, <b>90°</b> = hacia el fondo, <b>180°</b> = hacia la izquierda, <b>270°</b> = hacia la cámara.">
             <div class="ctl-head"><label for="sliderWindDir">Dirección</label><span class="ctl-hint" id="windDirHint"></span></div>
