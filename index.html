@@ -274,9 +274,39 @@
     .btn-row.mini .action-btn { padding: 5px 2px; font-size: 10.5px; }
     .pane-note { margin: 4px 0 8px; font-size: 10.5px; line-height: 1.4; color: var(--muted); }
 
+    canvas { touch-action: none; } /* touch drags the cloth / orbits instead of scrolling */
+    .guide {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(15, 23, 42, 0.35);
+    }
+    .guide[hidden] { display: none; }
+    .guide-card {
+      max-width: 460px;
+      background: #fff;
+      border-radius: 14px;
+      padding: 18px 20px;
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--text);
+      user-select: text;
+    }
+    .guide-card h2 { font-size: 15px; color: var(--ink); margin-bottom: 8px; }
+    .guide-card ol { padding-left: 18px; margin-bottom: 14px; }
+    .guide-card li { margin-bottom: 6px; }
+    .guide-card b { color: var(--ink); }
     @media (max-width: 640px) {
-      .hud-panel { top: 8px; right: 8px; left: 8px; width: auto; max-height: 60vh; }
+      /* Phones: the panel becomes a sheet at the bottom; the scene stays visible above it */
+      .hud-panel { top: auto; bottom: 8px; right: 8px; left: 8px; width: auto; max-height: 55vh; }
       .hud-panel.collapsed { left: auto; }
+      .stats-bar { top: 8px; bottom: auto; left: 8px; right: 8px; font-size: 10px; }
+      .tabs button { font-size: 10px; padding: 6px 2px; }
     }
     .stats-bar {
       position: absolute;
@@ -301,7 +331,10 @@
           <div class="hud-title">Simulador de Láminas</div>
           <div class="hud-subtitle">Lámina Delgada XPBD + Plasticidad</div>
         </div>
-        <button class="toggle-btn" id="toggleHudBtn">Ocultar</button>
+        <div style="display:flex; gap:6px">
+          <button class="toggle-btn" id="btnHelp" title="Cómo usar el simulador" aria-label="Ayuda">?</button>
+          <button class="toggle-btn" id="toggleHudBtn">Ocultar</button>
+        </div>
       </div>
       <div class="hud-body">
         <!-- Always visible: playback -->
@@ -642,6 +675,19 @@
             <div class="ctl-head"><label for="chkSaveShape">Guardar también la forma actual</label><input type="checkbox" id="chkSaveShape" checked /></div>
           </div>
         </section>
+      </div>
+    </div>
+    <div class="guide" id="guide" hidden>
+      <div class="guide-card" role="dialog" aria-labelledby="guideTitle">
+        <h2 id="guideTitle">Cómo usar el simulador</h2>
+        <ol>
+          <li><b>Arrastra la tela</b> con el ratón (o el dedo) para tirar de ella. Arrastra fuera de la tela para <b>girar la cámara</b>; la rueda (o pellizcar) acerca y aleja.</li>
+          <li><b>Espacio</b> pausa y reanuda. La <b>línea de tiempo</b> de arriba permite volver atrás y seguir desde ahí.</li>
+          <li><b>Simulación</b>: objeto (bolsa, lámina, tela redonda, cojín), puntos fijos y obstáculo (mesa, silla, bicicleta…). <b>Material</b>: plástico, papel, seda, algodón… <b>Viento</b> y <b>Escena</b>: viento, fondo, luces y cámara.</li>
+          <li>El botón <b>(i)</b> junto a cada control explica qué hace.</li>
+          <li><b>Exportar</b>: STL para imprimir en 3D (pausa primero), modelos GLB/OBJ, vídeo, y guardar o compartir la escena.</li>
+        </ol>
+        <button class="action-btn primary wide" id="btnGuideClose">Entendido</button>
       </div>
     </div>
     <div class="stats-bar" id="statsBar">

@@ -132,6 +132,7 @@ let quality = 'normal'; // simulation quality: fast | normal | high
 let mouseTool = 'pull'; // 'pull' = drag the film, 'pin' = click to fix / release points
 let pinClick = null; // pin tool: pointer-down info to tell a click from a drag
 let pinTween = null; // smooth gather / spread of the fixed points
+let stepInProgress = null; // physics step being spread over several refreshes { k, n, dt }
 let bagData = null;
 let solver = null;
 let posAttr = null;
@@ -518,6 +519,7 @@ function refreshStatus() {
 
 // ---- Timeline (history of the simulation) ----
 function resetHistory() {
+  stepInProgress = null; // the state is being replaced: drop any half-done step
   history.clear();
   simTime = 0;
   frameCounter = 0;
@@ -541,6 +543,7 @@ sliderTime.addEventListener('input', () => {
   if (!paused) setPaused(true);
   endBagDrag();
   viewIndex = parseInt(sliderTime.value, 10);
+  stepInProgress = null;
   history.restore(viewIndex);
   showPinModeFromSolver(); // the selector follows the frame being viewed
   syncGeometry();
@@ -961,6 +964,37 @@ setupMaterials(appearance);
 collider = setupCollider({ scene, floorY: SOLVER_FIXED.floorY, getSolver: () => solver });
 buildObject('bag', 'low');
 
+// ---- First-time guide ----
+const guide = document.getElementById('guide');
+function showGuide(show) {
+  guide.hidden = !show;
+  if (!show) {
+    try {
+      localStorage.setItem('bolsa-sim.guideSeen', '1');
+    } catch {
+      /* not remembered */
+    }
+  }
+}
+document.getElementById('btnHelp').addEventListener('click', () => showGuide(true));
+document.getElementById('btnGuideClose').addEventListener('click', () => showGuide(false));
+guide.addEventListener('click', (e) => {
+  if (e.target === guide) showGuide(false);
+});
+let guideSeen = false;
+try {
+  guideSeen = localStorage.getItem('bolsa-sim.guideSeen') === '1';
+} catch {
+  guideSeen = false;
+}
+if (!guideSeen && !location.hash.includes('escena=')) showGuide(true);
+
+// Phones: start with the panel folded so the scene is visible
+if (window.matchMedia('(max-width: 640px)').matches) {
+  hudPanel.classList.add('collapsed');
+  toggleHudBtn.textContent = 'Controles';
+}
+
 // ---- 3D model export, video, save / load / share ----
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 const baseName = () => `${OBJECTS[currentObj].file}-${currentRes}`;
@@ -1171,6 +1205,7 @@ window.addEventListener('resize', () => {
 });
 
 const PHYS_DT = 1 / 60;
+const STEP_BUDGET_MS = 16; // physics time per screen refresh (one 60 Hz frame) before the rest of a step waits
 let lastFrameTime = performance.now();
 let stepClock = 0; // real seconds owed to the physics
 
@@ -1199,16 +1234,29 @@ function animate(now = performance.now()) {
     } else {
       // One 1/60 s physics step per 1/60 s of real time, so the bag moves at the same pace on
       // 60, 120 or 144 Hz screens (at most one step per frame: slow meshes run in slow motion)
+      // A heavy step (fine meshes) is spread over several screen refreshes: at most ~16 ms of
+      // substeps per refresh, so orbiting and the panel stay smooth (the physics runs slower).
       stepClock = Math.min(stepClock + elapsed, 2 * PHYS_DT);
-      if (stepClock >= PHYS_DT - 0.002) {
+      if (!stepInProgress && stepClock >= PHYS_DT - 0.002) {
         stepClock = Math.max(0, stepClock - PHYS_DT);
         const dt = PHYS_DT * simSpeed;
-        solver.step(dt);
-        simTime += dt;
-        syncGeometry();
-        if (++frameCounter % 2 === 0) {
-          history.record(simTime);
-          refreshTimeline();
+        solver.beginStep(dt);
+        stepInProgress = { k: 0, n: solver._st.substeps, dt };
+      }
+      if (stepInProgress) {
+        const t0 = performance.now();
+        do {
+          solver.substep(stepInProgress.k++);
+        } while (stepInProgress.k < stepInProgress.n && performance.now() - t0 < STEP_BUDGET_MS);
+        if (stepInProgress.k >= stepInProgress.n) {
+          solver.endStep();
+          simTime += stepInProgress.dt;
+          stepInProgress = null;
+          syncGeometry();
+          if (++frameCounter % 2 === 0) {
+            history.record(simTime);
+            refreshTimeline();
+          }
         }
       }
     }

@@ -524,7 +524,19 @@ export class XPBDBagSolver {
     }
   }
 
+  /** Advances one frame (all substeps at once). */
   step(dt) {
+    this.beginStep(dt);
+    for (let k = 0; k < this._st.substeps; k++) this.substep(k);
+    this.endStep();
+  }
+
+  /**
+   * First part of a frame: aerodynamics (once per frame) and the per-frame constants.
+   * Then run substep(0 .. substeps-1) and endStep(). Split this way so a slow frame can be
+   * spread over several screen refreshes and the page stays responsive.
+   */
+  beginStep(dt) {
     const substeps = this.params.substeps;
     const sdt = dt / substeps;
     const N = this.numVerts;
@@ -630,166 +642,174 @@ export class XPBDBagSolver {
     const stretchAlpha = 1 / (Math.max(1, P.stretchStiffness) * sdt * sdt);
     const bendAlphaScale = 1 / (Math.max(1e-10, P.bendStiffness) * sdt * sdt); // ÷ per-hinge geometry
 
-    for (let step = 0; step < substeps; step++) {
-      // 1. Integrate velocities & predict positions
-      for (let i = 0; i < N; i++) {
-        if (this.pinned[i]) {
-          this.pos[3 * i] = this.pinTarget[3 * i];
-          this.pos[3 * i + 1] = this.pinTarget[3 * i + 1];
-          this.pos[3 * i + 2] = this.pinTarget[3 * i + 2];
-          this.prevPos[3 * i] = this.pinTarget[3 * i];
-          this.prevPos[3 * i + 1] = this.pinTarget[3 * i + 1];
-          this.prevPos[3 * i + 2] = this.pinTarget[3 * i + 2];
-          continue;
-        }
+    this._st = { dt, substeps, sdt, N, press, gx, gy, gz, damp, stretchAlpha, bendAlphaScale, P };
+  }
 
-        const ix = 3 * i, iy = ix + 1, iz = ix + 2;
-        this.prevPos[ix] = this.pos[ix];
-        this.prevPos[iy] = this.pos[iy];
-        this.prevPos[iz] = this.pos[iz];
-
-        // Gravity, warm-up sculpting and pressure (aerodynamic drag was applied above, per frame)
-        const w = this.invMass[i];
-        this.vel[ix] += (gx + this.extForces[ix] + press[ix] * w) * sdt;
-        this.vel[iy] += (gy + this.extForces[iy] + press[iy] * w) * sdt;
-        this.vel[iz] += (gz + this.extForces[iz] + press[iz] * w) * sdt;
-
-        // Viscous damping (air viscosity / internal friction of the material)
-        this.vel[ix] *= damp;
-        this.vel[iy] *= damp;
-        this.vel[iz] *= damp;
-
-        this.pos[ix] += this.vel[ix] * sdt;
-        this.pos[iy] += this.vel[iy] * sdt;
-        this.pos[iz] += this.vel[iz] * sdt;
+  /** One substep: integrate, drag, constraints, collisions, velocities. */
+  substep(step) {
+    const { substeps, sdt, N, press, gx, gy, gz, damp, stretchAlpha, bendAlphaScale, P } = this._st;
+    // 1. Integrate velocities & predict positions
+    for (let i = 0; i < N; i++) {
+      if (this.pinned[i]) {
+        this.pos[3 * i] = this.pinTarget[3 * i];
+        this.pos[3 * i + 1] = this.pinTarget[3 * i + 1];
+        this.pos[3 * i + 2] = this.pinTarget[3 * i + 2];
+        this.prevPos[3 * i] = this.pinTarget[3 * i];
+        this.prevPos[3 * i + 1] = this.pinTarget[3 * i + 1];
+        this.prevPos[3 * i + 2] = this.pinTarget[3 * i + 2];
+        continue;
       }
 
-      // Interactive handle-tip dragging (moves the suspended handle pin)
-      if (this.dragHandleGroup) {
-        const dx = this.dragTarget[0] - this.dragHandleStart[0];
-        const dy = this.dragTarget[1] - this.dragHandleStart[1];
-        const dz = this.dragTarget[2] - this.dragHandleStart[2];
-        for (let k = 0; k < this.dragPinStarts.length; k++) {
-          const item = this.dragPinStarts[k];
-          this.pinTarget[3 * item.idx] = item.x + dx;
-          this.pinTarget[3 * item.idx + 1] = item.y + dy;
-          this.pinTarget[3 * item.idx + 2] = item.z + dz;
-        }
-      }
+      const ix = 3 * i, iy = ix + 1, iz = ix + 2;
+      this.prevPos[ix] = this.pos[ix];
+      this.prevPos[iy] = this.pos[iy];
+      this.prevPos[iz] = this.pos[iz];
 
-      // Interactive mouse drag / soft-radius pinch-wrinkle
-      if (this.dragVertex >= 0) {
-        for (let k = 0; k < this.dragPatch.length; k++) {
-          const { idx, weight, ox, oy, oz } = this.dragPatch[k];
-          if (this.pinned[idx]) continue;
-          const pIdx = 3 * idx;
-          if (this.wrinkleMode) {
-            const px = this.dragTarget[0] - this.pos[pIdx];
-            const py = this.dragTarget[1] - this.pos[pIdx + 1];
-            const pz = this.dragTarget[2] - this.pos[pIdx + 2];
-            const jitter = Math.sin(idx * 19.37) * 0.003;
-            this.pos[pIdx] += px * 0.35 * weight;
-            this.pos[pIdx + 1] += py * 0.35 * weight;
-            this.pos[pIdx + 2] += (pz * 0.35 + jitter) * weight;
-          } else {
-            // Pull patch toward dragTarget + its initial offset so the bag follows the cursor cleanly
-            const tx = this.dragTarget[0] + ox;
-            const ty = this.dragTarget[1] + oy;
-            const tz = this.dragTarget[2] + oz;
-            const pull = 0.78 * weight;
-            this.pos[pIdx] += (tx - this.pos[pIdx]) * pull;
-            this.pos[pIdx + 1] += (ty - this.pos[pIdx + 1]) * pull;
-            this.pos[pIdx + 2] += (tz - this.pos[pIdx + 2]) * pull;
-          }
-        }
-      }
+      // Gravity, warm-up sculpting and pressure (aerodynamic drag was applied above, per frame)
+      const w = this.invMass[i];
+      this.vel[ix] += (gx + this.extForces[ix] + press[ix] * w) * sdt;
+      this.vel[iy] += (gy + this.extForces[iy] + press[iy] * w) * sdt;
+      this.vel[iz] += (gz + this.extForces[iz] + press[iz] * w) * sdt;
 
-      // 2. Solve Stretch Constraints (extra passes on finer meshes keep the film from sagging)
-      for (let it = 0; it < this.stretchIters; it++) {
-        for (let c = 0; c < this.numStretch; c++) {
-          const a = this.stretchA[c];
-          const b = this.stretchB[c];
-          const w1 = this.invMass[a];
-          const w2 = this.invMass[b];
-          const wSum = w1 + w2;
-          if (wSum === 0) continue;
+      // Viscous damping (air viscosity / internal friction of the material)
+      this.vel[ix] *= damp;
+      this.vel[iy] *= damp;
+      this.vel[iz] *= damp;
 
-          const ia = 3 * a, ib = 3 * b;
-          const dx = this.pos[ib] - this.pos[ia];
-          const dy = this.pos[ib + 1] - this.pos[ia + 1];
-          const dz = this.pos[ib + 2] - this.pos[ia + 2];
-          const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (len < 1e-8) continue;
+      this.pos[ix] += this.vel[ix] * sdt;
+      this.pos[iy] += this.vel[iy] * sdt;
+      this.pos[iz] += this.vel[iz] * sdt;
+    }
 
-          const C = len - this.stretchRestLen[c];
-          const lambda = -C / (wSum + stretchAlpha);
-          const scale = lambda / len;
-
-          if (w1 > 0) {
-            this.pos[ia] -= dx * scale * w1;
-            this.pos[ia + 1] -= dy * scale * w1;
-            this.pos[ia + 2] -= dz * scale * w1;
-          }
-          if (w2 > 0) {
-            this.pos[ib] += dx * scale * w2;
-            this.pos[ib + 1] += dy * scale * w2;
-            this.pos[ib + 2] += dz * scale * w2;
-          }
-        }
-      }
-
-      // 3. Solve Dihedral Bending Constraints
-      this._solveBending(bendAlphaScale);
-
-      // 4. Floor Collision
-      const floorY = this.params.floorY;
-      const keep = 1 - Math.max(0, Math.min(1, P.friction)); // share of sliding motion kept
-      for (let i = 0; i < N; i++) {
-        if (this.pinned[i]) continue;
-        const iy = 3 * i + 1;
-        if (this.pos[iy] < floorY) {
-          this.pos[iy] = floorY;
-          // Floor friction
-          this.pos[3 * i] = this.prevPos[3 * i] + (this.pos[3 * i] - this.prevPos[3 * i]) * keep;
-          this.pos[3 * i + 2] = this.prevPos[3 * i + 2] + (this.pos[3 * i + 2] - this.prevPos[3 * i + 2]) * keep;
-        }
-      }
-
-      // 4b. Obstacle
-      if (this.collider) this._solveCollider();
-
-      // 5. Self-Collision (run once per frame on last substep to prevent CPU spikes/stuttering)
-      if (this.params.selfCollision && step === substeps - 1) {
-        this._solveSelfCollision();
-      }
-
-      // 6. Update velocities from position change (with velocity clamp & NaN guard)
-      const invSdt = 1.0 / sdt;
-      const maxVel = 4.5;
-      for (let i = 0; i < N; i++) {
-        if (this.pinned[i]) continue;
-        const ix = 3 * i, iy = ix + 1, iz = ix + 2;
-        if (!Number.isFinite(this.pos[ix]) || !Number.isFinite(this.pos[iy]) || !Number.isFinite(this.pos[iz])) {
-          this.pos[ix] = this.prevPos[ix];
-          this.pos[iy] = this.prevPos[iy];
-          this.pos[iz] = this.prevPos[iz];
-          this.vel[ix] = 0; this.vel[iy] = 0; this.vel[iz] = 0;
-          continue;
-        }
-        let vx = (this.pos[ix] - this.prevPos[ix]) * invSdt;
-        let vy = (this.pos[iy] - this.prevPos[iy]) * invSdt;
-        let vz = (this.pos[iz] - this.prevPos[iz]) * invSdt;
-        const vLen = Math.sqrt(vx * vx + vy * vy + vz * vz);
-        if (vLen > maxVel) {
-          const s = maxVel / vLen;
-          vx *= s; vy *= s; vz *= s;
-        }
-        this.vel[ix] = vx;
-        this.vel[iy] = vy;
-        this.vel[iz] = vz;
+    // Interactive handle-tip dragging (moves the suspended handle pin)
+    if (this.dragHandleGroup) {
+      const dx = this.dragTarget[0] - this.dragHandleStart[0];
+      const dy = this.dragTarget[1] - this.dragHandleStart[1];
+      const dz = this.dragTarget[2] - this.dragHandleStart[2];
+      for (let k = 0; k < this.dragPinStarts.length; k++) {
+        const item = this.dragPinStarts[k];
+        this.pinTarget[3 * item.idx] = item.x + dx;
+        this.pinTarget[3 * item.idx + 1] = item.y + dy;
+        this.pinTarget[3 * item.idx + 2] = item.z + dz;
       }
     }
 
+    // Interactive mouse drag / soft-radius pinch-wrinkle
+    if (this.dragVertex >= 0) {
+      for (let k = 0; k < this.dragPatch.length; k++) {
+        const { idx, weight, ox, oy, oz } = this.dragPatch[k];
+        if (this.pinned[idx]) continue;
+        const pIdx = 3 * idx;
+        if (this.wrinkleMode) {
+          const px = this.dragTarget[0] - this.pos[pIdx];
+          const py = this.dragTarget[1] - this.pos[pIdx + 1];
+          const pz = this.dragTarget[2] - this.pos[pIdx + 2];
+          const jitter = Math.sin(idx * 19.37) * 0.003;
+          this.pos[pIdx] += px * 0.35 * weight;
+          this.pos[pIdx + 1] += py * 0.35 * weight;
+          this.pos[pIdx + 2] += (pz * 0.35 + jitter) * weight;
+        } else {
+          // Pull patch toward dragTarget + its initial offset so the bag follows the cursor cleanly
+          const tx = this.dragTarget[0] + ox;
+          const ty = this.dragTarget[1] + oy;
+          const tz = this.dragTarget[2] + oz;
+          const pull = 0.78 * weight;
+          this.pos[pIdx] += (tx - this.pos[pIdx]) * pull;
+          this.pos[pIdx + 1] += (ty - this.pos[pIdx + 1]) * pull;
+          this.pos[pIdx + 2] += (tz - this.pos[pIdx + 2]) * pull;
+        }
+      }
+    }
+
+    // 2. Solve Stretch Constraints (extra passes on finer meshes keep the film from sagging)
+    for (let it = 0; it < this.stretchIters; it++) {
+      for (let c = 0; c < this.numStretch; c++) {
+        const a = this.stretchA[c];
+        const b = this.stretchB[c];
+        const w1 = this.invMass[a];
+        const w2 = this.invMass[b];
+        const wSum = w1 + w2;
+        if (wSum === 0) continue;
+
+        const ia = 3 * a, ib = 3 * b;
+        const dx = this.pos[ib] - this.pos[ia];
+        const dy = this.pos[ib + 1] - this.pos[ia + 1];
+        const dz = this.pos[ib + 2] - this.pos[ia + 2];
+        const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (len < 1e-8) continue;
+
+        const C = len - this.stretchRestLen[c];
+        const lambda = -C / (wSum + stretchAlpha);
+        const scale = lambda / len;
+
+        if (w1 > 0) {
+          this.pos[ia] -= dx * scale * w1;
+          this.pos[ia + 1] -= dy * scale * w1;
+          this.pos[ia + 2] -= dz * scale * w1;
+        }
+        if (w2 > 0) {
+          this.pos[ib] += dx * scale * w2;
+          this.pos[ib + 1] += dy * scale * w2;
+          this.pos[ib + 2] += dz * scale * w2;
+        }
+      }
+    }
+
+    // 3. Solve Dihedral Bending Constraints
+    this._solveBending(bendAlphaScale);
+
+    // 4. Floor Collision
+    const floorY = this.params.floorY;
+    const keep = 1 - Math.max(0, Math.min(1, P.friction)); // share of sliding motion kept
+    for (let i = 0; i < N; i++) {
+      if (this.pinned[i]) continue;
+      const iy = 3 * i + 1;
+      if (this.pos[iy] < floorY) {
+        this.pos[iy] = floorY;
+        // Floor friction
+        this.pos[3 * i] = this.prevPos[3 * i] + (this.pos[3 * i] - this.prevPos[3 * i]) * keep;
+        this.pos[3 * i + 2] = this.prevPos[3 * i + 2] + (this.pos[3 * i + 2] - this.prevPos[3 * i + 2]) * keep;
+      }
+    }
+
+    // 4b. Obstacle
+    if (this.collider) this._solveCollider();
+
+    // 5. Self-Collision (run once per frame on last substep to prevent CPU spikes/stuttering)
+    if (this.params.selfCollision && step === substeps - 1) {
+      this._solveSelfCollision();
+    }
+
+    // 6. Update velocities from position change (with velocity clamp & NaN guard)
+    const invSdt = 1.0 / sdt;
+    const maxVel = 4.5;
+    for (let i = 0; i < N; i++) {
+      if (this.pinned[i]) continue;
+      const ix = 3 * i, iy = ix + 1, iz = ix + 2;
+      if (!Number.isFinite(this.pos[ix]) || !Number.isFinite(this.pos[iy]) || !Number.isFinite(this.pos[iz])) {
+        this.pos[ix] = this.prevPos[ix];
+        this.pos[iy] = this.prevPos[iy];
+        this.pos[iz] = this.prevPos[iz];
+        this.vel[ix] = 0; this.vel[iy] = 0; this.vel[iz] = 0;
+        continue;
+      }
+      let vx = (this.pos[ix] - this.prevPos[ix]) * invSdt;
+      let vy = (this.pos[iy] - this.prevPos[iy]) * invSdt;
+      let vz = (this.pos[iz] - this.prevPos[iz]) * invSdt;
+      const vLen = Math.sqrt(vx * vx + vy * vy + vz * vz);
+      if (vLen > maxVel) {
+        const s = maxVel / vLen;
+        vx *= s; vy *= s; vz *= s;
+      }
+      this.vel[ix] = vx;
+      this.vel[iy] = vy;
+      this.vel[iz] = vz;
+    }
+  }
+
+  /** Last part of a frame: simulated time and plastic crease memory. */
+  endStep() {
+    const dt = this._st.dt;
     this.time += dt;
 
     // 7. Elasto-Plastic Crease Memory Update (once per frame)
