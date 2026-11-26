@@ -104,7 +104,7 @@
     /* ---------- Tabs ---------- */
     .tabs {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 2px;
       margin: 12px 0 4px;
       padding: 3px;
@@ -237,6 +237,26 @@
     .seg button small { display: block; font-weight: 500; font-size: 9.5px; color: var(--muted); }
     .seg button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-dark); }
 
+    .swatches { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+    .swatches button {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 1px solid rgba(15, 23, 42, 0.18);
+      cursor: pointer;
+      padding: 0;
+    }
+    .swatches button.active { outline: 2px solid var(--accent); outline-offset: 2px; }
+    input[type="color"] {
+      width: 26px;
+      height: 22px;
+      padding: 0;
+      border: 1px solid rgba(148, 163, 184, 0.5);
+      border-radius: 6px;
+      background: none;
+      cursor: pointer;
+      margin-left: auto;
+    }
     .pane-note { margin: 4px 0 8px; font-size: 10.5px; line-height: 1.4; color: var(--muted); }
 
     @media (max-width: 640px) {
@@ -287,6 +307,7 @@
           <button type="button" role="tab" data-tab="sim">Simulación</button>
           <button type="button" role="tab" data-tab="mat">Material</button>
           <button type="button" role="tab" data-tab="wind">Viento</button>
+          <button type="button" role="tab" data-tab="scene">Escena</button>
           <button type="button" role="tab" data-tab="export">Exportar</button>
         </nav>
 
@@ -372,6 +393,88 @@
           <div class="ctl" data-info="Cuánto varía el viento. <b>0</b> = flujo constante (la bolsa se queda quieta, inclinada); <b>alto</b> = ráfagas que cambian de fuerza y dirección y hacen flamear el plástico.">
             <div class="ctl-head"><label for="sliderWindTurb">Ráfagas</label></div>
             <input type="range" id="sliderWindTurb" min="0" max="1" step="0.05" value="0.4" />
+          </div>
+        </section>
+
+        <!-- ===== Escena ===== -->
+        <section class="tab-pane" data-tab="scene" role="tabpanel" hidden>
+          <div class="section-title">Fondo y suelo</div>
+          <div class="ctl" data-info="Color del fondo de la escena. Elige uno de la paleta o cualquier color con el selector de la derecha.">
+            <div class="ctl-head"><label for="colorBg">Color de fondo</label><input type="color" id="colorBg" value="#f4f5f7" /></div>
+            <div class="swatches" data-for="colorBg">
+              <button type="button" data-color="#f4f5f7" style="background:#f4f5f7" title="Gris claro"></button>
+              <button type="button" data-color="#ffffff" style="background:#ffffff" title="Blanco"></button>
+              <button type="button" data-color="#e7e0d4" style="background:#e7e0d4" title="Arena"></button>
+              <button type="button" data-color="#9ca3af" style="background:#9ca3af" title="Gris medio"></button>
+              <button type="button" data-color="#1e293b" style="background:#1e293b" title="Pizarra"></button>
+              <button type="button" data-color="#0b0f19" style="background:#0b0f19" title="Casi negro"></button>
+            </div>
+          </div>
+          <div class="ctl ctl-check" data-info="Pasa el fondo de un color plano a un degradado vertical (más claro arriba), como un estudio fotográfico.">
+            <div class="ctl-head"><label for="chkGradient">Degradado</label><input type="checkbox" id="chkGradient" /></div>
+          </div>
+          <div class="ctl" data-info="<b>Sombra</b> = solo la sombra de la bolsa (suelo invisible); <b>Rejilla</b> = sombra más una cuadrícula de 10 cm para juzgar el tamaño; <b>Sólido</b> = un suelo opaco; <b>Ninguno</b> = la bolsa flota sin suelo visible (sigue chocando con él).">
+            <div class="ctl-head"><span class="ctl-name">Suelo</span></div>
+            <div class="seg seg-4" id="floorSeg">
+              <button type="button" data-floor="shadow" class="active">Sombra</button>
+              <button type="button" data-floor="grid">Rejilla</button>
+              <button type="button" data-floor="solid">Sólido</button>
+              <button type="button" data-floor="none">Ninguno</button>
+            </div>
+          </div>
+          <div class="ctl" data-info="Ajuste de luces. <b>Estudio</b> = luz principal y contraluz azulado (por defecto); <b>Suave</b> = luz difusa sin sombras duras; <b>Dramática</b> = luz lateral intensa que marca cada arruga; <b>Atardecer</b> = luz cálida y baja.">
+            <div class="ctl-head"><span class="ctl-name">Iluminación</span></div>
+            <div class="seg seg-4" id="lightSeg">
+              <button type="button" data-light="studio" class="active">Estudio</button>
+              <button type="button" data-light="soft">Suave</button>
+              <button type="button" data-light="dramatic">Dramática</button>
+              <button type="button" data-light="sunset">Atardecer</button>
+            </div>
+          </div>
+
+          <div class="section-title">Aspecto de la bolsa</div>
+          <div class="ctl" data-info="Color del plástico. Solo cambia el aspecto, no el comportamiento físico.">
+            <div class="ctl-head"><label for="colorBag">Color</label><input type="color" id="colorBag" value="#2d89bd" /></div>
+            <div class="swatches" data-for="colorBag">
+              <button type="button" data-color="#2d89bd" style="background:#2d89bd" title="Azul"></button>
+              <button type="button" data-color="#f1f5f9" style="background:#f1f5f9" title="Blanco"></button>
+              <button type="button" data-color="#dc2626" style="background:#dc2626" title="Rojo"></button>
+              <button type="button" data-color="#16a34a" style="background:#16a34a" title="Verde"></button>
+              <button type="button" data-color="#facc15" style="background:#facc15" title="Amarillo"></button>
+              <button type="button" data-color="#111827" style="background:#111827" title="Negro"></button>
+            </div>
+          </div>
+          <div class="ctl" data-info="Cuánto se ve a través del plástico. <b>1</b> = opaco; valores bajos = film muy fino y translúcido.">
+            <div class="ctl-head"><label for="sliderOpacity">Opacidad</label></div>
+            <input type="range" id="sliderOpacity" min="0.2" max="1" step="0.02" value="0.68" />
+          </div>
+          <div class="ctl" data-info="Brillo de la superficie. <b>Alto</b> = plástico satinado con reflejos nítidos; <b>bajo</b> = acabado mate.">
+            <div class="ctl-head"><label for="sliderShine">Brillo</label></div>
+            <input type="range" id="sliderShine" min="0" max="1" step="0.02" value="0.88" />
+          </div>
+          <div class="ctl ctl-check" data-info="Relieve fino de ondulaciones horizontales, como las del film extruido. Solo es visual: no aparece en el STL.">
+            <div class="ctl-head"><label for="chkRipples">Microarrugas</label><input type="checkbox" id="chkRipples" checked /></div>
+          </div>
+
+          <div class="section-title">Cámara e imagen</div>
+          <div class="ctl" data-info="Lleva la cámara suavemente a una vista fija. Después puedes seguir girando con el ratón (arrastrar fuera de la bolsa) y acercarte con la rueda.">
+            <div class="ctl-head"><span class="ctl-name">Vista</span></div>
+            <div class="seg seg-4" id="viewSeg">
+              <button type="button" data-view="iso">3/4</button>
+              <button type="button" data-view="front">Frente</button>
+              <button type="button" data-view="side">Lado</button>
+              <button type="button" data-view="top">Arriba</button>
+            </div>
+          </div>
+          <div class="ctl ctl-check" data-info="Muestra la flecha azul que indica hacia dónde sopla el viento (solo aparece si hay viento).">
+            <div class="ctl-head"><label for="chkArrow">Flecha de viento</label><input type="checkbox" id="chkArrow" checked /></div>
+          </div>
+          <div class="ctl ctl-check" data-info="Guarda la imagen PNG sin fondo, para pegarla sobre otra imagen o una presentación. La sombra se conserva.">
+            <div class="ctl-head"><label for="chkTransparentPng">PNG con fondo transparente</label><input type="checkbox" id="chkTransparentPng" /></div>
+          </div>
+          <div class="btn-row" style="margin-top:6px">
+            <button class="action-btn" id="btnScreenshot" title="Descarga lo que se ve ahora como imagen PNG">Captura PNG</button>
+            <button class="action-btn" id="btnResetScene" title="Vuelve al fondo, luces, colores y vista por defecto">Restablecer escena</button>
           </div>
         </section>
 

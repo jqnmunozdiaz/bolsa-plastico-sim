@@ -8,6 +8,7 @@ import { writeBinaryStl } from './printable.js';
 import { SimHistory } from './history.js';
 import StlWorker from './stlWorker.js?worker&inline';
 import { setupPanel } from './panel.js';
+import { setupAppearance } from './appearance.js';
 
 /**
  * Generates a procedural fine HDPE extrusion-ripple bump texture
@@ -59,7 +60,7 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.position.set(0.08, 0.35, 1.24);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
@@ -689,7 +690,9 @@ const DIR_NAMES = ['la derecha', 'el fondo-der.', 'el fondo', 'el fondo-izq.', '
 // Arrow in the scene showing where the wind blows (as seen from the default camera)
 const windArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 0.1, 0x0ea5e9, 0.035, 0.022);
 windArrow.visible = false;
-scene.add(windArrow);
+const windArrowGroup = new THREE.Group(); // the Escena tab can hide the arrow altogether
+windArrowGroup.add(windArrow);
+scene.add(windArrowGroup);
 
 function updateWindUi() {
   const speed = parseFloat(sliderWind.value);
@@ -737,6 +740,10 @@ document.getElementById('resSeg').addEventListener('click', (e) => {
 });
 
 setupPanel();
+setupAppearance({
+  scene, renderer, camera, controls, bagMaterial, floorMesh, floorY: SOLVER_FIXED.floorY,
+  hemiLight, keyLight, rimLight, windArrowGroup,
+});
 buildBag('low');
 
 // 6. Animation Loop
