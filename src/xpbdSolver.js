@@ -12,8 +12,11 @@ export class XPBDBagSolver {
     this.numVerts = bagMeshData.numVertices;
     this.numTris = bagMeshData.numTriangles;
     this.indices = bagMeshData.indices;
-    this.leftTipIndices = bagMeshData.leftTipIndices;
-    this.rightTipIndices = bagMeshData.rightTipIndices;
+    this.leftTipIndices = bagMeshData.leftTipIndices ?? [];
+    this.rightTipIndices = bagMeshData.rightTipIndices ?? [];
+    // Named groups of vertices that can be fixed in place (bag: the two handle tips)
+    this.pinGroups = bagMeshData.pinGroups ?? { left: this.leftTipIndices, right: this.rightTipIndices };
+    this.pinCandidates = Int32Array.from(new Set(Object.values(this.pinGroups).flat()));
     this.gussetIndices = bagMeshData.gussetIndices;
     this.dimensions = bagMeshData.dimensions;
 
@@ -43,8 +46,13 @@ export class XPBDBagSolver {
 
     // Masses, forces and stiffnesses come from physical units, so they are resolution independent.
     // A few numerical settings still depend on the edge length (reference mesh: nx = 24, nv = 40).
-    const dims = bagMeshData.dimensions;
-    const edgeRatio = Math.sqrt((24 * 40) / (dims.nx * dims.nv)); // ~ edge length / reference edge length
+    // edgeRatio ~ edge length / reference edge length, from the mean triangle area
+    // (reference: the low-resolution bag, 9.757e-5 m² per triangle)
+    let restArea = 0;
+    for (let t = 0; t < this.numTris; t++) {
+      restArea += this._triArea(bagMeshData.positions, this.indices[3 * t], this.indices[3 * t + 1], this.indices[3 * t + 2]);
+    }
+    const edgeRatio = Math.sqrt(restArea / this.numTris / 9.757e-5);
     // Smaller hinges see smaller angles for the same curvature -> lower the plastic yield angle
     this.yieldAngle = 0.26 * edgeRatio;
     // Allow more candidates per hash cell when the mesh is denser
@@ -72,6 +80,19 @@ export class XPBDBagSolver {
     }
     this.baseInvMass = new Float32Array(N);
     this.updateMasses();
+
+    // Where internal pressure acts (per triangle, 0..1). Bag: its body below the handles
+    if (bagMeshData.pressureMask) {
+      this.pressureMask = bagMeshData.pressureMask;
+    } else {
+      const H = this.dimensions.H;
+      this.pressureMask = new Float32Array(this.numTris);
+      for (let t = 0; t < this.numTris; t++) {
+        let y = 0;
+        for (let k = 0; k < 3; k++) y += this.restPos[3 * this.indices[3 * t + k] + 1] / 3;
+        this.pressureMask[t] = Math.max(0, 1 - Math.pow(y / (H * 0.72), 2));
+      }
+    }
 
     // Precompute stretch edges & rest lengths
     const edges = bagMeshData.stretchEdges;
@@ -149,8 +170,9 @@ export class XPBDBagSolver {
     this.exclStart[N] = off;
     this.exclMark = new Int32Array(N).fill(-1);
 
-    // Per-frame aerodynamic force buffer (reused to avoid allocations)
+    // Per-frame aerodynamic impulses and pressure forces (reused to avoid allocations)
     this.aeroForces = new Float32Array(N * 3);
+    this.pressForces = new Float32Array(N * 3);
 
     // Spatial hash buffers (zero-allocation per step)
     this.hashSize = 8192;
@@ -232,7 +254,8 @@ export class XPBDBagSolver {
     if (key === 'density') this.updateMasses();
   }
 
-  resetFlat() {
+  /** Back to the rest shape: no motion, no creases, nothing pinned. */
+  resetToRest() {
     this.cancelReferencePose();
     this.pos.set(this.restPos);
     this.prevPos.set(this.restPos);
@@ -240,10 +263,46 @@ export class XPBDBagSolver {
     this.extForces.fill(0);
     this.bendRestAngle.set(this.bendInitialAngle);
     this.clearPins();
+  }
+
+  /** Bag only: flat bag hanging from both handles. */
+  resetFlat() {
+    this.resetToRest();
     this.pinHandles(
       { x: -0.125, y: 0.56, z: 0.0 },
       { x: 0.125, y: 0.56, z: 0.0 }
     );
+  }
+
+  /**
+   * Fixes exactly the vertices of the named groups (where they are now) and releases the other
+   * pinnable vertices.
+   */
+  setPinnedGroups(names) {
+    const want = new Set();
+    for (const n of names) for (const i of this.pinGroups[n] ?? []) want.add(i);
+    for (const i of this.pinCandidates) {
+      const on = want.has(i);
+      if (on && !this.pinned[i]) {
+        this.pinned[i] = 1;
+        this.invMass[i] = 0;
+        for (let k = 0; k < 3; k++) {
+          this.pinTarget[3 * i + k] = this.pos[3 * i + k];
+          this.prevPos[3 * i + k] = this.pos[3 * i + k];
+        }
+      } else if (!on && this.pinned[i]) {
+        this.pinned[i] = 0;
+        this.invMass[i] = this.baseInvMass[i];
+      }
+      if (on) this.vel[3 * i] = this.vel[3 * i + 1] = this.vel[3 * i + 2] = 0;
+    }
+  }
+
+  /** Set of currently pinned vertices among the pinnable ones. */
+  pinnedSet() {
+    const out = new Set();
+    for (const i of this.pinCandidates) if (this.pinned[i]) out.add(i);
+    return out;
   }
 
   clearPins() {
@@ -404,43 +463,17 @@ export class XPBDBagSolver {
   }
 
   /**
-   * Fixes or releases each handle. A handle that gets fixed is pinned where it is right now,
-   * so nothing jumps; a released handle becomes ordinary film.
-   */
-  setHandlePins(left, right) {
-    const apply = (indices, want) => {
-      for (const i of indices) {
-        if (want && !this.pinned[i]) {
-          this.pinned[i] = 1;
-          this.invMass[i] = 0;
-          for (let k = 0; k < 3; k++) {
-            this.pinTarget[3 * i + k] = this.pos[3 * i + k];
-            this.prevPos[3 * i + k] = this.pos[3 * i + k];
-          }
-        } else if (!want && this.pinned[i]) {
-          this.pinned[i] = 0;
-          this.invMass[i] = this.baseInvMass[i];
-        }
-        this.vel[3 * i] = this.vel[3 * i + 1] = this.vel[3 * i + 2] = 0;
-      }
-    };
-    apply(this.leftTipIndices, left);
-    apply(this.rightTipIndices, right);
-  }
-
-  /** Which handles are currently fixed. */
-  handlePins() {
-    return {
-      left: this.leftTipIndices.length > 0 && this.pinned[this.leftTipIndices[0]] === 1,
-      right: this.rightTipIndices.length > 0 && this.pinned[this.rightTipIndices[0]] === 1,
-    };
-  }
-
-  /**
    * Applies a random crumple impulse & temporary inward squeeze, then lets go.
    */
   triggerCrumpleImpulse() {
-    const cx = 0, cy = 0.22, cz = 0;
+    // Squeeze towards the centre of the free film
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (let i = 0; i < this.numVerts; i++) {
+      if (this.pinned[i]) continue;
+      cx += this.pos[3 * i]; cy += this.pos[3 * i + 1]; cz += this.pos[3 * i + 2]; n++;
+    }
+    if (n === 0) return;
+    cx /= n; cy /= n; cz /= n;
     for (let i = 0; i < this.numVerts; i++) {
       if (this.pinned[i]) continue;
       const dx = cx - this.pos[3 * i];
@@ -476,11 +509,12 @@ export class XPBDBagSolver {
     //  - Internal overpressure p (Pa) on the bag body: F = p A along the facet normal.
     const impulses = this.aeroForces;
     impulses.fill(0);
+    const press = this.pressForces; // pressure is a steady force: applied every substep, not as one kick
+    press.fill(0);
     const P = this.params;
     const rhoFilm = Math.max(1e-4, P.density);
     const kDrag = (0.5 * 1.2 * Math.max(0, P.dragCoeff)) / rhoFilm; // 1/m
     const pressure = P.pressure;
-    const H = this.dimensions.H;
     const windOn = P.windSpeed > 0.01;
     const az = (P.windAzimuth * Math.PI) / 180;
     const el = (P.windElevation * Math.PI) / 180;
@@ -514,9 +548,8 @@ export class XPBDBagSolver {
 
       const vn = vx * nx + vy * ny + vz * nz;
 
-      // Internal pressure acts on the bag body (below the handles)
       const avgY = (y0 + this.pos[3 * i1 + 1] + this.pos[3 * i2 + 1]) / 3;
-      const bodyMask = Math.max(0, 1 - Math.pow(avgY / (H * 0.72), 2));
+      const bodyMask = this.pressureMask[t]; // where internal pressure acts
       let wn = 0; // air velocity along the normal
       if (windOn) {
         const cx = (x0 * 3 + e1x + e2x) / 3, cy = avgY, cz = (z0 * 3 + e1z + e2z) / 3;
@@ -537,8 +570,14 @@ export class XPBDBagSolver {
       }
       const vrel = vn - wn; // film speed relative to the air, along the normal
       const dvn = -vrel * (1 - 1 / (1 + kDrag * Math.abs(vrel) * dt)); // implicit quadratic drag
-      // Impulse on the facet (its film mass times the velocity change) plus the pressure push
-      const J = (rhoFilm * area * dvn + pressure * area * bodyMask * dt) / 3;
+      // Drag impulse on the facet (its film mass times the velocity change), shared by its corners
+      const F = (pressure * area * bodyMask) / 3;
+      if (F !== 0) {
+        press[3 * i0] += F * nx; press[3 * i0 + 1] += F * ny; press[3 * i0 + 2] += F * nz;
+        press[3 * i1] += F * nx; press[3 * i1 + 1] += F * ny; press[3 * i1 + 2] += F * nz;
+        press[3 * i2] += F * nx; press[3 * i2 + 1] += F * ny; press[3 * i2 + 2] += F * nz;
+      }
+      const J = (rhoFilm * area * dvn) / 3;
       if (J === 0) continue;
       const jx = J * nx, jy = J * ny, jz = J * nz;
       impulses[3 * i0] += jx; impulses[3 * i0 + 1] += jy; impulses[3 * i0 + 2] += jz;
@@ -576,10 +615,11 @@ export class XPBDBagSolver {
         this.prevPos[iy] = this.pos[iy];
         this.prevPos[iz] = this.pos[iz];
 
-        // Gravity + warm-up sculpting accelerations (aerodynamics were applied above, per frame)
-        this.vel[ix] += this.extForces[ix] * sdt;
-        this.vel[iy] += (g + this.extForces[iy]) * sdt;
-        this.vel[iz] += this.extForces[iz] * sdt;
+        // Gravity, warm-up sculpting and pressure (aerodynamic drag was applied above, per frame)
+        const w = this.invMass[i];
+        this.vel[ix] += (this.extForces[ix] + press[ix] * w) * sdt;
+        this.vel[iy] += (g + this.extForces[iy] + press[iy] * w) * sdt;
+        this.vel[iz] += (this.extForces[iz] + press[iz] * w) * sdt;
 
         // Subtle velocity damping for numerical stability
         this.vel[ix] *= 0.996;

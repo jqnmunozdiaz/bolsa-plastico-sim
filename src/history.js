@@ -9,7 +9,7 @@ export class SimHistory {
     this.solver = solver;
     const N = solver.numVerts;
     const B = solver.numBending;
-    this.tips = Int32Array.from([...solver.leftTipIndices, ...solver.rightTipIndices]);
+    this.tips = solver.pinCandidates; // every vertex that can be pinned
     const T = this.tips.length;
     this.off = { vel: 3 * N, bend: 6 * N, pin: 6 * N + B, pinT: 6 * N + B + T };
     this.size = 6 * N + B + 4 * T;

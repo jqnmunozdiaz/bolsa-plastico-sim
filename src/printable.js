@@ -53,12 +53,15 @@ export function buildPrintableSolid(wasm, P, idx, options = {}, progress = () =>
     solid.numTri(); // force evaluation before freeing the inputs
     for (const p of prisms) p.delete();
 
-    // 3. Keep the main body (+ any sizeable piece) and sealed pockets that are large enough to matter
+    // 3. Keep the main body and any sizeable piece. Sealed air pockets (negative-volume shells, e.g.
+    //    the inside of a pillow) are filled: the slicer then prints that space with infill, which
+    //    prints reliably, instead of a hollow it cannot support.
     const comps = solid.decompose();
     const vols = comps.map((c) => c.volume());
     const mainVol = Math.max(...vols);
-    const kept = comps.filter((c, i) => (vols[i] > 0 ? vols[i] >= 0.01 * mainVol : -vols[i] >= 50));
-    info.removedPieces = comps.length - kept.length;
+    const kept = comps.filter((c, i) => vols[i] > 0 && vols[i] >= 0.01 * mainVol);
+    info.filledVoids = vols.filter((v) => v < 0).length;
+    info.removedPieces = comps.length - kept.length - info.filledVoids;
     solid = keep(Manifold.compose(kept));
     for (const c of comps) c.delete();
 

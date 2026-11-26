@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Bolsa de Plástico — Simulación Física XPBD</title>
+  <title>Simulador de Láminas — Física XPBD</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -298,7 +298,7 @@
     <div class="hud-panel" id="hudPanel">
       <div class="hud-header">
         <div>
-          <div class="hud-title">Física de la Bolsa</div>
+          <div class="hud-title">Simulador de Láminas</div>
           <div class="hud-subtitle">Lámina Delgada XPBD + Plasticidad</div>
         </div>
         <button class="toggle-btn" id="toggleHudBtn">Ocultar</button>
@@ -328,7 +328,16 @@
 
         <!-- ===== Simulación ===== -->
         <section class="tab-pane" data-tab="sim" role="tabpanel">
-          <div class="ctl" data-info="Número de vértices de la malla. <b>Más vértices</b> = arrugas más finas y un STL más detallado, pero la simulación va más lenta. Cambiarla vuelve a generar la pose de referencia.">
+          <div class="ctl" data-info="Qué se simula. <b>Bolsa</b> = bolsa de supermercado con asas; <b>Lámina</b> = rectángulo de 70 × 50 cm (mantel, bandera, cortina, sábana); <b>Tela redonda</b> = círculo de 60 cm de diámetro; <b>Cojín</b> = dos piezas de 50 × 34 cm cosidas por el borde, que se hincha con la presión interna. Cambiar de objeto aplica la presión sugerida para él.">
+            <div class="ctl-head"><span class="ctl-name">Objeto</span></div>
+            <div class="seg seg-4" id="objSeg">
+              <button type="button" data-obj="bag" class="active">Bolsa</button>
+              <button type="button" data-obj="sheet">Lámina</button>
+              <button type="button" data-obj="round">Tela redonda</button>
+              <button type="button" data-obj="pillow">Cojín</button>
+            </div>
+          </div>
+          <div class="ctl" data-info="Número de vértices de la malla. <b>Más vértices</b> = arrugas más finas y un STL más detallado, pero la simulación va más lenta. Cambiarla vuelve a colocar el objeto en su posición inicial.">
             <div class="ctl-head"><span class="ctl-name">Resolución de malla</span></div>
             <div class="seg" id="resSeg">
               <button type="button" data-res="low" class="active">Baja<small>2,1k vért.</small></button>
@@ -336,14 +345,9 @@
               <button type="button" data-res="high">Alta<small>8,5k vért.</small></button>
             </div>
           </div>
-          <div class="ctl" data-info="Qué asas quedan sujetas en el aire. Con <b>una sola</b>, la otra se suelta y pasa a ser parte de la simulación (cae, se balancea y se puede arrastrar). Con <b>ninguna</b>, la bolsa cae al suelo. Un asa que se vuelve a fijar queda sujeta donde esté en ese momento.">
-            <div class="ctl-head"><span class="ctl-name">Asas fijas</span></div>
-            <div class="seg seg-4" id="handleSeg">
-              <button type="button" data-handles="both" class="active">Ambas</button>
-              <button type="button" data-handles="left">Izquierda</button>
-              <button type="button" data-handles="right">Derecha</button>
-              <button type="button" data-handles="none">Ninguna</button>
-            </div>
+          <div class="ctl" data-info="Qué partes del objeto quedan sujetas en el aire. Lo demás cuelga, cae y se mueve libremente. <b>Bolsa</b>: las asas. <b>Lámina</b>: dos esquinas (ropa tendida), todo el borde superior (cortina), el borde izquierdo (bandera en su mástil) o una esquina; <b>Suelta</b> cae plana al suelo. <b>Tela redonda</b>: el centro (cae como un fantasma) o un punto del borde. <b>Cojín</b>: apoyado en el suelo o colgado. Los puntos fijos se pueden <b>arrastrar</b> con el ratón.">
+            <div class="ctl-head"><span class="ctl-name">Puntos fijos</span></div>
+            <div class="seg" id="pinSeg"></div>
           </div>
           <div class="ctl" data-info="Ritmo del tiempo de la física. <b>&lt;1</b> = cámara lenta para ver cómo se forman los pliegues; <b>&gt;1</b> = más rápido. No cambia el material.">
             <div class="ctl-head"><label for="sliderSpeed">Velocidad</label></div>
@@ -408,9 +412,9 @@
             <div class="ctl-head"><label for="sliderDrag">Coef. de arrastre (Cd)</label></div>
             <input type="range" id="sliderDrag" min="0" max="2" step="0.05" value="1.0" />
           </div>
-          <div class="ctl" data-info="Sobrepresión del aire dentro del cuerpo de la bolsa, en pascales. <b>0,2–1 Pa</b> basta para hincharla y alisar las arrugas; <b>negativo</b> la desinfla y la hace colapsar.">
+          <div class="ctl" data-info="Sobrepresión del aire dentro del objeto, en pascales (solo actúa en la <b>bolsa</b> y el <b>cojín</b>, que tienen un interior). Bolsa: <b>0,2–1 Pa</b> la hincha y alisa las arrugas. Cojín de plástico: ~1,5 Pa; de tela pesada: 3 Pa o más. <b>Negativo</b> desinfla.">
             <div class="ctl-head"><label for="sliderPressure">Presión interna</label></div>
-            <input type="range" id="sliderPressure" min="-0.5" max="2" step="0.05" value="0" data-unit="Pa" />
+            <input type="range" id="sliderPressure" min="-0.5" max="10" step="0.05" value="0" data-unit="Pa" />
           </div>
           <div class="ctl" data-info="Rozamiento con el suelo. <b>0</b> = desliza como sobre hielo; <b>1</b> = se queda pegada donde toca.">
             <div class="ctl-head"><label for="sliderFriction">Fricción con el suelo</label></div>
@@ -522,7 +526,7 @@
 
         <!-- ===== Exportar ===== -->
         <section class="tab-pane" data-tab="export" role="tabpanel" hidden>
-          <div class="ctl" data-info="El STL se exporta como sólido cerrado y reparado (sin auto-intersecciones ni aristas compartidas), con Z hacia arriba y reducido proporcionalmente para que ningún eje (X, Y, Z) supere <b>24 cm</b> en la placa. La reparación tarda 2–15 s según la resolución.">
+          <div class="ctl" data-info="El STL se exporta como sólido cerrado y reparado (sin auto-intersecciones ni aristas compartidas), con Z hacia arriba y reducido proporcionalmente para que ningún eje (X, Y, Z) supere <b>24 cm</b> en la placa. Los huecos cerrados (el interior del cojín, bolsas de aire atrapadas) se rellenan: el laminador los imprime con relleno. La reparación tarda 2–15 s según la resolución.">
             <div class="ctl-head"><span class="ctl-name">STL imprimible</span><span class="ctl-hint" style="margin-left:auto">máx. 24 cm por eje</span></div>
             <p class="pane-note">Pausa la simulación (Espacio) en el momento que quieras imprimir y descarga.</p>
             <button class="action-btn wide" id="btnDownloadStl" disabled title="Pausa la simulación (Espacio) para descargar el STL">Descargar STL</button>

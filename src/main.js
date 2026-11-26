@@ -1,13 +1,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { createSupermarketBagGeometry } from './bagGeometry.js';
+import { OBJECTS, pinModeSet } from './objects.js';
 import { XPBDBagSolver } from './xpbdSolver.js';
 import { solidifyShell } from './solidify.js';
 import { writeBinaryStl } from './printable.js';
 import { SimHistory } from './history.js';
 import StlWorker from './stlWorker.js?worker&inline';
-import { setupPanel, getControlValue } from './panel.js';
+import { setupPanel, getControlValue, setControlValue } from './panel.js';
 import { setupAppearance } from './appearance.js';
 import { setupMaterials } from './materials.js';
 
@@ -118,16 +118,12 @@ floorMesh.position.y = -0.04;
 floorMesh.receiveShadow = true;
 scene.add(floorMesh);
 
-// 3. Bag Mesh & XPBD Physics Solver (rebuilt when the mesh resolution changes)
-const RESOLUTIONS = {
-  low: { label: 'Baja', nx: 24, ng: 6, nv: 40 },
-  mid: { label: 'Media', nx: 36, ng: 8, nv: 60 },
-  high: { label: 'Alta', nx: 48, ng: 12, nv: 80 },
-};
-const BAG_SHAPE = { width: 0.34, height: 0.50, gussetDepth: 0.068, halfThickness: 0.018 };
+// 3. Object Mesh & XPBD Physics Solver (rebuilt when the object or the mesh resolution changes)
 const SOLVER_FIXED = { thickness: 0.0085, floorY: -0.04, substeps: 7 };
 
+let currentObj = 'bag';
 let currentRes = 'low';
+let pinModeId = OBJECTS.bag.pinModes[0].id;
 let bagData = null;
 let solver = null;
 let posAttr = null;
@@ -207,33 +203,53 @@ function syncGeometry() {
   bagData.geometry.boundingSphere = null; // recomputed lazily for raycasting/culling
 }
 
-/** (Re)creates the mesh + solver at the given resolution and starts the reference-pose warm-up. */
-function buildBag(resKey) {
-  const res = RESOLUTIONS[resKey];
+/** (Re)creates the mesh + solver for an object at a resolution and puts it in its starting pose. */
+function buildObject(objKey, resKey) {
+  const obj = OBJECTS[objKey];
   const oldGeometry = bagData ? bagData.geometry : bagMesh.geometry;
   endBagDrag();
 
-  bagData = createSupermarketBagGeometry({ ...BAG_SHAPE, nx: res.nx, ng: res.ng, nv: res.nv });
+  if (objKey !== currentObj) pinModeId = obj.pinModes[0].id;
+  bagData = obj.build(obj.resolutions[resKey]);
   solver = new XPBDBagSolver(bagData, { ...SOLVER_FIXED, ...readUiParams() });
   posAttr = bagData.geometry.attributes.position;
   bagMesh.geometry = bagData.geometry;
   wireMesh.geometry = bagData.geometry;
   oldGeometry.dispose();
+  const objChanged = objKey !== currentObj;
+  currentObj = objKey;
   currentRes = resKey;
   stlResult = '';
 
   history = new SimHistory(solver);
+  startObject();
 
-  // Physical warm-up runs over the next frames so the page never freezes
-  solver.beginReferencePose(170);
-  resetHistory();
-  syncGeometry();
-
-  for (const btn of document.querySelectorAll('#resSeg button')) {
-    btn.classList.toggle('active', btn.dataset.res === resKey);
+  for (const btn of document.querySelectorAll('#objSeg button')) btn.classList.toggle('active', btn.dataset.obj === objKey);
+  for (const btn of document.querySelectorAll('#resSeg button')) btn.classList.toggle('active', btn.dataset.res === resKey);
+  if (objChanged || !document.querySelector('#pinSeg button')) {
+    renderPinSeg();
+    updateResCounts();
   }
-  setPaused(false); // a new mesh always starts simulating its reference pose
+  setPaused(false); // a new mesh always starts simulating
   refreshStatus();
+}
+
+/**
+ * Starting pose: the bag runs its physical warm-up (spread over the next frames so the page never
+ * freezes); the other objects are placed directly and the timeline starts right away.
+ */
+function startObject() {
+  const obj = OBJECTS[currentObj];
+  if (obj.referencePose) {
+    solver.beginReferencePose(170);
+    resetHistory();
+  } else {
+    obj.place(solver, currentPinMode().groups);
+    resetHistory();
+    history.record(simTime);
+    refreshTimeline();
+  }
+  syncGeometry();
 }
 
 // 4. Interactive Mouse Raycast Dragging on the Bag
@@ -300,11 +316,11 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
     solver.dragTarget[2] = hit.point.z;
 
     if (solver.pinned[bestV]) {
-      // Dragging a handle tip moves that handle's pin!
-      const isLeft = bagData.leftTipIndices.includes(bestV);
-      solver.dragHandleGroup = isLeft ? 'left' : 'right';
+      // Dragging a fixed point moves its whole group (a handle, a corner clip, an edge…)
+      const groupName = currentPinMode().groups.find((g) => solver.pinGroups[g]?.includes(bestV));
+      const group = (groupName ? solver.pinGroups[groupName] : [bestV]).filter((i) => solver.pinned[i]);
+      solver.dragHandleGroup = groupName ?? 'point';
       solver.dragHandleStart = [hit.point.x, hit.point.y, hit.point.z];
-      const group = isLeft ? bagData.leftTipIndices : bagData.rightTipIndices;
       solver.dragPinStarts = group.map((idx) => ({
         idx,
         x: solver.pinTarget[3 * idx],
@@ -391,9 +407,7 @@ btnWrinkleMode.addEventListener('click', () => {
 
 document.getElementById('btnRefPose').addEventListener('click', () => {
   endBagDrag();
-  solver.beginReferencePose(170);
-  resetHistory();
-  syncGeometry();
+  startObject();
   setPaused(false);
   refreshStatus();
 });
@@ -405,8 +419,7 @@ document.getElementById('btnShake').addEventListener('click', () => {
 });
 document.getElementById('btnFlat').addEventListener('click', () => {
   endBagDrag();
-  solver.resetFlat();
-  applyHandleMode();
+  OBJECTS[currentObj].place(solver, currentPinMode().groups); // flat, no creases
   // A reset starts a new timeline (otherwise it would be labelled with the old run's time)
   resetHistory();
   history.record(simTime);
@@ -475,7 +488,7 @@ sliderTime.addEventListener('input', () => {
   endBagDrag();
   viewIndex = parseInt(sliderTime.value, 10);
   history.restore(viewIndex);
-  showHandleMode(solver.handlePins()); // the selector follows the frame being viewed
+  showPinModeFromSolver(); // the selector follows the frame being viewed
   syncGeometry();
   refreshTimeline();
 });
@@ -616,7 +629,7 @@ btnDownloadStl.addEventListener('click', async () => {
   for (let i = 0; i < P.length; i++) P[i] *= scaleMm;
 
   const wallMm = parseFloat(sliderWall.value);
-  const filename = `bolsa-supermercado-${currentRes}.stl`;
+  const filename = `${OBJECTS[currentObj].file}-${currentRes}.stl`;
   try {
     const { stl, info } = await runStlWorker(
       P.slice(),
@@ -661,37 +674,51 @@ document.getElementById('chkWireframe').addEventListener('change', (e) => {
   wireMesh.visible = e.target.checked;
 });
 
-// ---- Fixed handles: both, only one, or none ----
-const HANDLE_MODES = {
-  both: { left: true, right: true },
-  left: { left: true, right: false },
-  right: { left: false, right: true },
-  none: { left: false, right: false },
-};
-let handleMode = 'both';
+// ---- Fixed points: which parts of the object are held in place ----
+function currentPinMode() {
+  const modes = OBJECTS[currentObj].pinModes;
+  return modes.find((m) => m.id === pinModeId) ?? modes[0];
+}
 
-function showHandleMode(pins) {
-  handleMode = Object.keys(HANDLE_MODES).find(
-    (k) => HANDLE_MODES[k].left === pins.left && HANDLE_MODES[k].right === pins.right
-  );
-  for (const btn of document.querySelectorAll('#handleSeg button')) {
-    btn.classList.toggle('active', btn.dataset.handles === handleMode);
+function renderPinSeg() {
+  const seg = document.getElementById('pinSeg');
+  const modes = OBJECTS[currentObj].pinModes;
+  seg.textContent = '';
+  seg.style.gridTemplateColumns = `repeat(${modes.length}, 1fr)`;
+  for (const m of modes) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.pin = m.id;
+    b.textContent = m.label;
+    b.classList.toggle('active', m.id === currentPinMode().id);
+    seg.append(b);
   }
 }
 
-/** Applies the selected mode (the reference-pose warm-up always holds both; it is applied when it ends). */
-function applyHandleMode() {
-  if (solver.isWarmingUp()) return;
-  const m = HANDLE_MODES[handleMode];
-  solver.setHandlePins(m.left, m.right);
+/** After scrubbing the timeline: select the mode that matches what is pinned in that frame. */
+function showPinModeFromSolver() {
+  const pinned = solver.pinnedSet();
+  const match = OBJECTS[currentObj].pinModes.find((m) => {
+    const s = pinModeSet(solver.pinGroups, m);
+    return s.size === pinned.size && [...s].every((i) => pinned.has(i));
+  });
+  if (match) pinModeId = match.id;
+  for (const b of document.querySelectorAll('#pinSeg button')) b.classList.toggle('active', b.dataset.pin === pinModeId);
 }
 
-document.getElementById('handleSeg').addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-handles]');
+/** Applies the selected mode (the bag's warm-up always holds both handles; it is applied when it ends). */
+function applyPinMode() {
+  if (solver.isWarmingUp()) return;
+  solver.setPinnedGroups(currentPinMode().groups);
+}
+
+document.getElementById('pinSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-pin]');
   if (!btn) return;
   endBagDrag();
-  showHandleMode(HANDLE_MODES[btn.dataset.handles]);
-  applyHandleMode();
+  pinModeId = btn.dataset.pin;
+  for (const b of document.querySelectorAll('#pinSeg button')) b.classList.toggle('active', b === btn);
+  applyPinMode();
 });
 
 // ---- Wind ----
@@ -740,17 +767,27 @@ for (const [el, key] of [
 }
 updateWindUi();
 
-// Mesh resolution selector (vertex counts computed from the actual generator)
-for (const [key, res] of Object.entries(RESOLUTIONS)) {
-  const probe = createSupermarketBagGeometry({ ...BAG_SHAPE, nx: res.nx, ng: res.ng, nv: res.nv });
-  const k = (probe.numVertices / 1000).toLocaleString('es-ES', { maximumFractionDigits: 1 });
-  document.querySelector(`#resSeg button[data-res="${key}"] small`).textContent = `${k}k vért.`;
-  probe.geometry.dispose();
+// Mesh resolution selector (vertex counts computed from the actual generator of the current object)
+function updateResCounts() {
+  const obj = OBJECTS[currentObj];
+  for (const [key, r] of Object.entries(obj.resolutions)) {
+    const probe = obj.build(r);
+    const k = (probe.numVertices / 1000).toLocaleString('es-ES', { maximumFractionDigits: 1 });
+    document.querySelector(`#resSeg button[data-res="${key}"] small`).textContent = `${k}k vért.`;
+    probe.geometry.dispose();
+  }
 }
 document.getElementById('resSeg').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-res]');
   if (!btn || btn.dataset.res === currentRes) return;
-  buildBag(btn.dataset.res);
+  buildObject(currentObj, btn.dataset.res);
+});
+document.getElementById('objSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-obj]');
+  if (!btn || btn.dataset.obj === currentObj) return;
+  // Each object suggests its own internal pressure (only the bag and the pillow have an inside)
+  setControlValue('sliderPressure', OBJECTS[btn.dataset.obj].pressure);
+  buildObject(btn.dataset.obj, currentRes);
 });
 
 setupPanel();
@@ -759,7 +796,7 @@ const appearance = setupAppearance({
   hemiLight, keyLight, rimLight, windArrowGroup,
 });
 setupMaterials(appearance);
-buildBag('low');
+buildObject('bag', 'low');
 
 // 6. Animation Loop
 window.addEventListener('resize', () => {
@@ -787,7 +824,7 @@ function animate(now = performance.now()) {
       syncGeometry();
       if (!solver.isWarmingUp()) {
         // Pose ready: apply the chosen fixed handles; the timeline starts here
-        applyHandleMode();
+        applyPinMode();
         resetHistory();
         history.record(simTime);
         refreshTimeline();
