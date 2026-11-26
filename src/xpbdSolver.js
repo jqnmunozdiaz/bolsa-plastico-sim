@@ -53,6 +53,7 @@ export class XPBDBagSolver {
       restArea += this._triArea(bagMeshData.positions, this.indices[3 * t], this.indices[3 * t + 1], this.indices[3 * t + 2]);
     }
     const edgeRatio = Math.sqrt(restArea / this.numTris / 9.757e-5);
+    this.meanEdge = Math.sqrt((2 * restArea) / this.numTris); // typical edge length (m)
     // Smaller hinges see smaller angles for the same curvature -> lower the plastic yield angle
     this.yieldAngle = 0.26 * edgeRatio;
     // Allow more candidates per hash cell when the mesh is denser
@@ -278,34 +279,48 @@ export class XPBDBagSolver {
     );
   }
 
-  /**
-   * Fixes exactly the vertices of the named groups (where they are now) and releases the other
-   * pinnable vertices.
-   */
-  setPinnedGroups(names) {
-    const want = new Set();
-    for (const n of names) for (const i of this.pinGroups[n] ?? []) want.add(i);
-    for (const i of this.pinCandidates) {
-      const on = want.has(i);
-      if (on && !this.pinned[i]) {
-        this.pinned[i] = 1;
-        this.invMass[i] = 0;
-        for (let k = 0; k < 3; k++) {
-          this.pinTarget[3 * i + k] = this.pos[3 * i + k];
-          this.prevPos[3 * i + k] = this.pos[3 * i + k];
-        }
-      } else if (!on && this.pinned[i]) {
-        this.pinned[i] = 0;
-        this.invMass[i] = this.baseInvMass[i];
+  /** Fixes the given vertices where they are now. */
+  pinVertices(list) {
+    for (const i of list) {
+      if (this.pinned[i]) continue;
+      this.pinned[i] = 1;
+      this.invMass[i] = 0;
+      for (let k = 0; k < 3; k++) {
+        this.pinTarget[3 * i + k] = this.pos[3 * i + k];
+        this.prevPos[3 * i + k] = this.pos[3 * i + k];
       }
-      if (on) this.vel[3 * i] = this.vel[3 * i + 1] = this.vel[3 * i + 2] = 0;
+      this.vel[3 * i] = this.vel[3 * i + 1] = this.vel[3 * i + 2] = 0;
     }
   }
 
-  /** Set of currently pinned vertices among the pinnable ones. */
+  /** Releases the given vertices (they become ordinary film again). */
+  releaseVertices(list) {
+    for (const i of list) {
+      if (!this.pinned[i]) continue;
+      this.pinned[i] = 0;
+      this.invMass[i] = this.baseInvMass[i];
+    }
+  }
+
+  /** Makes exactly this set of vertices fixed (new ones where they are now); releases all others. */
+  setPinnedSet(want) {
+    const release = [];
+    for (let i = 0; i < this.numVerts; i++) if (this.pinned[i] && !want.has(i)) release.push(i);
+    this.releaseVertices(release);
+    this.pinVertices(want);
+  }
+
+  /** Fixes exactly the vertices of the named groups and releases every other vertex. */
+  setPinnedGroups(names) {
+    const want = new Set();
+    for (const n of names) for (const i of this.pinGroups[n] ?? []) want.add(i);
+    this.setPinnedSet(want);
+  }
+
+  /** Set of currently pinned vertices. */
   pinnedSet() {
     const out = new Set();
-    for (const i of this.pinCandidates) if (this.pinned[i]) out.add(i);
+    for (let i = 0; i < this.numVerts; i++) if (this.pinned[i]) out.add(i);
     return out;
   }
 

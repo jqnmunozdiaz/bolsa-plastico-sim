@@ -126,6 +126,10 @@ let currentObj = 'bag';
 let currentRes = 'low';
 let pinModeId = OBJECTS.bag.pinModes[0].id;
 let collider = null; // obstacle controls + mesh (set up before the first object is built)
+let customPins = new Set(); // fixed vertices chosen by hand (pin mode 'custom')
+let mouseTool = 'pull'; // 'pull' = drag the film, 'pin' = click to fix / release points
+let pinClick = null; // pin tool: pointer-down info to tell a click from a drag
+let pinTween = null; // smooth gather / spread of the fixed points
 let bagData = null;
 let solver = null;
 let posAttr = null;
@@ -211,7 +215,7 @@ function buildObject(objKey, resKey) {
   const oldGeometry = bagData ? bagData.geometry : bagMesh.geometry;
   endBagDrag();
 
-  if (objKey !== currentObj) pinModeId = obj.pinModes[0].id;
+  if (objKey !== currentObj || pinModeId === 'custom') pinModeId = obj.pinModes[0].id;
   bagData = obj.build(obj.resolutions[resKey]);
   solver = new XPBDBagSolver(bagData, { ...SOLVER_FIXED, ...readUiParams() });
   collider?.attach(solver);
@@ -247,7 +251,7 @@ function startObject() {
     solver.beginReferencePose(170);
     resetHistory();
   } else {
-    obj.place(solver, currentPinMode().groups);
+    placeObject();
     resetHistory();
     history.record(simTime);
     refreshTimeline();
@@ -320,18 +324,20 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
 
     if (solver.pinned[bestV]) {
       // Dragging a fixed point moves its whole group (a handle, a corner clip, an edge…)
-      const groupName = currentPinMode().groups.find((g) => solver.pinGroups[g]?.includes(bestV));
-      const group = (groupName ? solver.pinGroups[groupName] : [bestV]).filter((i) => solver.pinned[i]);
-      solver.dragHandleGroup = groupName ?? 'point';
-      solver.dragHandleStart = [hit.point.x, hit.point.y, hit.point.z];
-      solver.dragPinStarts = group.map((idx) => ({
-        idx,
-        x: solver.pinTarget[3 * idx],
-        y: solver.pinTarget[3 * idx + 1],
-        z: solver.pinTarget[3 * idx + 2],
-      }));
-      solver.dragVertex = -1;
-      solver.dragPatch = [];
+      const groupName =
+        pinModeId === 'custom' ? null : currentPinMode().groups.find((g) => solver.pinGroups[g]?.includes(bestV));
+      const group = groupName
+        ? solver.pinGroups[groupName].filter((i) => solver.pinned[i])
+        : verticesNear(bestV, Math.max(0.03, 2.5 * solver.meanEdge), true);
+      startPinDrag(group, hit.point);
+      if (mouseTool === 'pin') pinClick = { x: e.clientX, y: e.clientY, cluster: group, wasPinned: true };
+    } else if (mouseTool === 'pin') {
+      // Fix a small patch where you click; keep the button down to carry it somewhere else
+      const cluster = verticesNear(bestV, Math.max(0.012, 1.2 * solver.meanEdge), false);
+      solver.pinVertices(cluster);
+      startPinDrag(cluster, hit.point);
+      pinClick = { x: e.clientX, y: e.clientY, cluster, wasPinned: false };
+      pinsChangedByHand();
     } else {
       solver.dragHandleGroup = null;
       solver.dragVertex = bestV;
@@ -386,7 +392,45 @@ function endBagDrag() {
   }
 }
 
-window.addEventListener('pointerup', endBagDrag);
+window.addEventListener('pointerup', (e) => {
+  if (pinClick) {
+    // A plain click (no drag) on a fixed point releases it
+    const moved = Math.hypot(e.clientX - pinClick.x, e.clientY - pinClick.y) > 4;
+    if (!moved && pinClick.wasPinned) {
+      solver.releaseVertices(pinClick.cluster);
+      pinsChangedByHand();
+    }
+    pinClick = null;
+  }
+  endBagDrag();
+});
+
+/** Vertices within `radius` of vertex v (optionally only fixed ones). */
+function verticesNear(v, radius, onlyPinned) {
+  const out = [];
+  const r2 = radius * radius;
+  const p = solver.pos;
+  for (let i = 0; i < solver.numVerts; i++) {
+    if (onlyPinned && !solver.pinned[i]) continue;
+    const dx = p[3 * i] - p[3 * v], dy = p[3 * i + 1] - p[3 * v + 1], dz = p[3 * i + 2] - p[3 * v + 2];
+    if (dx * dx + dy * dy + dz * dz <= r2) out.push(i);
+  }
+  return out;
+}
+
+/** Starts moving a set of fixed points with the mouse. */
+function startPinDrag(list, point) {
+  solver.dragHandleGroup = 'points';
+  solver.dragHandleStart = [point.x, point.y, point.z];
+  solver.dragPinStarts = list.map((idx) => ({
+    idx,
+    x: solver.pinTarget[3 * idx],
+    y: solver.pinTarget[3 * idx + 1],
+    z: solver.pinTarget[3 * idx + 2],
+  }));
+  solver.dragVertex = -1;
+  solver.dragPatch = [];
+}
 window.addEventListener('pointercancel', endBagDrag);
 window.addEventListener('blur', endBagDrag);
 
@@ -422,7 +466,7 @@ document.getElementById('btnShake').addEventListener('click', () => {
 });
 document.getElementById('btnFlat').addEventListener('click', () => {
   endBagDrag();
-  OBJECTS[currentObj].place(solver, currentPinMode().groups); // flat, no creases
+  placeObject(); // flat, no creases
   // A reset starts a new timeline (otherwise it would be labelled with the old run's time)
   resetHistory();
   history.record(simTime);
@@ -693,27 +737,121 @@ function renderPinSeg() {
     b.type = 'button';
     b.dataset.pin = m.id;
     b.textContent = m.label;
-    b.classList.toggle('active', m.id === currentPinMode().id);
+    b.classList.toggle('active', m.id === pinModeId);
     seg.append(b);
   }
+  document.getElementById('pinHint').textContent = '';
 }
 
-/** After scrubbing the timeline: select the mode that matches what is pinned in that frame. */
+/**
+ * Selects the mode that matches what is pinned now (after scrubbing the timeline or editing pins
+ * by hand); if none matches, the pins are "personalizado" and remembered as such.
+ */
 function showPinModeFromSolver() {
   const pinned = solver.pinnedSet();
   const match = OBJECTS[currentObj].pinModes.find((m) => {
     const s = pinModeSet(solver.pinGroups, m);
     return s.size === pinned.size && [...s].every((i) => pinned.has(i));
   });
-  if (match) pinModeId = match.id;
+  if (match) {
+    pinModeId = match.id;
+  } else {
+    pinModeId = 'custom';
+    customPins = pinned;
+  }
   for (const b of document.querySelectorAll('#pinSeg button')) b.classList.toggle('active', b.dataset.pin === pinModeId);
+  document.getElementById('pinHint').textContent = pinModeId === 'custom' ? `personalizado (${pinned.size} vért.)` : '';
+}
+
+function pinsChangedByHand() {
+  showPinModeFromSolver();
+}
+
+/** Puts the object in its starting position with the current fixed points. */
+function placeObject() {
+  const custom = pinModeId === 'custom';
+  OBJECTS[currentObj].place(solver, custom ? [] : currentPinMode().groups);
+  if (custom) solver.setPinnedSet(customPins);
 }
 
 /** Applies the selected mode (the bag's warm-up always holds both handles; it is applied when it ends). */
 function applyPinMode() {
   if (solver.isWarmingUp()) return;
-  solver.setPinnedGroups(currentPinMode().groups);
+  if (pinModeId === 'custom') solver.setPinnedSet(customPins);
+  else solver.setPinnedGroups(currentPinMode().groups);
 }
+
+// Pin tool: what a click on the film does
+document.getElementById('toolSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-tool]');
+  if (!b) return;
+  mouseTool = b.dataset.tool;
+  for (const x of document.querySelectorAll('#toolSeg button')) x.classList.toggle('active', x === b);
+});
+
+/**
+ * Gathers (f < 1) or spreads (f > 1) all fixed points around their centre over ~0.4 s.
+ * With a curtain's whole top edge fixed, gathering makes the cloth fold into pleats.
+ */
+function scalePins(f) {
+  const list = [...solver.pinnedSet()];
+  if (!list.length || solver.isWarmingUp()) return;
+  endBagDrag();
+  const c = [0, 0, 0];
+  for (const i of list) for (let k = 0; k < 3; k++) c[k] += solver.pinTarget[3 * i + k] / list.length;
+  const from = list.map((i) => [0, 1, 2].map((k) => solver.pinTarget[3 * i + k]));
+  const to = from.map((p) => p.map((v, k) => c[k] + (v - c[k]) * f));
+  pinTween = { list, from, to, frame: 0, frames: 24 };
+}
+document.getElementById('btnGather').addEventListener('click', () => scalePins(0.85));
+document.getElementById('btnSpread').addEventListener('click', () => scalePins(1 / 0.85));
+
+function advancePinTween() {
+  if (!pinTween) return;
+  const t = Math.min(1, ++pinTween.frame / pinTween.frames);
+  const e = t * t * (3 - 2 * t);
+  pinTween.list.forEach((i, n) => {
+    for (let k = 0; k < 3; k++) {
+      const v = pinTween.from[n][k] + (pinTween.to[n][k] - pinTween.from[n][k]) * e;
+      solver.pinTarget[3 * i + k] = v;
+      if (paused) solver.pos[3 * i + k] = v; // visible right away; the film follows on resume
+    }
+  });
+  if (paused) syncGeometry();
+  if (t >= 1) pinTween = null;
+}
+
+// Orange markers on every fixed vertex
+const pinMarkerGeo = new THREE.SphereGeometry(0.0045, 10, 8);
+const pinMarkerMat = new THREE.MeshBasicMaterial({ color: '#f97316' });
+let pinMarkers = null;
+const markerMatrix = new THREE.Matrix4();
+let showPins = true;
+function updatePinMarkers() {
+  if (!solver) return;
+  if (!pinMarkers || pinMarkers.instanceMatrix.count < solver.numVerts) {
+    if (pinMarkers) {
+      scene.remove(pinMarkers);
+      pinMarkers.dispose();
+    }
+    pinMarkers = new THREE.InstancedMesh(pinMarkerGeo, pinMarkerMat, solver.numVerts);
+    pinMarkers.frustumCulled = false;
+    scene.add(pinMarkers);
+  }
+  let n = 0;
+  if (showPins) {
+    for (let i = 0; i < solver.numVerts; i++) {
+      if (!solver.pinned[i]) continue;
+      markerMatrix.makeTranslation(solver.pos[3 * i], solver.pos[3 * i + 1], solver.pos[3 * i + 2]);
+      pinMarkers.setMatrixAt(n++, markerMatrix);
+    }
+  }
+  pinMarkers.count = n;
+  pinMarkers.instanceMatrix.needsUpdate = true;
+}
+document.getElementById('chkShowPins').addEventListener('change', (e) => {
+  showPins = e.target.checked;
+});
 
 document.getElementById('pinSeg').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-pin]');
@@ -721,6 +859,7 @@ document.getElementById('pinSeg').addEventListener('click', (e) => {
   endBagDrag();
   pinModeId = btn.dataset.pin;
   for (const b of document.querySelectorAll('#pinSeg button')) b.classList.toggle('active', b === btn);
+  document.getElementById('pinHint').textContent = '';
   applyPinMode();
 });
 
@@ -818,6 +957,7 @@ function animate(now = performance.now()) {
   const elapsed = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000));
   lastFrameTime = now;
 
+  advancePinTween();
   if (!paused) {
     if (solver.isWarmingUp()) {
       // Spread the reference-pose warm-up over frames (~28 ms of physics per frame)
@@ -852,6 +992,7 @@ function animate(now = performance.now()) {
     }
   }
 
+  updatePinMarkers();
   controls.update();
   renderer.render(scene, camera);
 }

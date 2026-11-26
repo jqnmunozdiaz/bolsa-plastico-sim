@@ -1,7 +1,8 @@
 /**
  * Ring buffer of solver snapshots so the user can scrub back in time.
  * A snapshot holds everything that evolves during the simulation:
- * positions, velocities, plastic crease memory (rest angles) and the handle pins.
+ * positions, velocities, plastic crease memory (rest angles) and which vertices are fixed
+ * (packed 16 per float; a fixed vertex sits exactly on its pin target, so its position is the target).
  * The number of frames kept is limited by a memory budget, so finer meshes keep a shorter window.
  */
 export class SimHistory {
@@ -9,10 +10,9 @@ export class SimHistory {
     this.solver = solver;
     const N = solver.numVerts;
     const B = solver.numBending;
-    this.tips = solver.pinCandidates; // every vertex that can be pinned
-    const T = this.tips.length;
-    this.off = { vel: 3 * N, bend: 6 * N, pin: 6 * N + B, pinT: 6 * N + B + T };
-    this.size = 6 * N + B + 4 * T;
+    this.flagFloats = Math.ceil(N / 16);
+    this.off = { vel: 3 * N, bend: 6 * N, pin: 6 * N + B };
+    this.size = 6 * N + B + this.flagFloats;
     this.capacity = Math.max(60, Math.min(maxFrames, Math.floor(budgetBytes / (this.size * 4))));
     this.bufs = new Array(this.capacity);
     this.times = new Float64Array(this.capacity);
@@ -47,12 +47,14 @@ export class SimHistory {
     buf.set(s.pos, 0);
     buf.set(s.vel, this.off.vel);
     buf.set(s.bendRestAngle, this.off.bend);
-    for (let k = 0; k < this.tips.length; k++) {
-      const v = this.tips[k];
-      buf[this.off.pin + k] = s.pinned[v];
-      buf[this.off.pinT + 3 * k] = s.pinTarget[3 * v];
-      buf[this.off.pinT + 3 * k + 1] = s.pinTarget[3 * v + 1];
-      buf[this.off.pinT + 3 * k + 2] = s.pinTarget[3 * v + 2];
+    const N = s.numVerts;
+    for (let f = 0; f < this.flagFloats; f++) {
+      let bits = 0;
+      for (let b = 0; b < 16; b++) {
+        const i = f * 16 + b;
+        if (i < N && s.pinned[i]) bits |= 1 << b;
+      }
+      buf[this.off.pin + f] = bits;
     }
     this.times[phys] = time;
   }
@@ -66,14 +68,21 @@ export class SimHistory {
     s.vel.set(buf.subarray(this.off.vel, this.off.vel + N3));
     s.bendRestAngle.set(buf.subarray(this.off.bend, this.off.bend + s.numBending));
     s.extForces.fill(0);
-    for (let k = 0; k < this.tips.length; k++) {
-      const v = this.tips[k];
-      const pinned = buf[this.off.pin + k] > 0.5;
-      s.pinned[v] = pinned ? 1 : 0;
-      s.invMass[v] = pinned ? 0 : s.baseInvMass[v];
-      s.pinTarget[3 * v] = buf[this.off.pinT + 3 * k];
-      s.pinTarget[3 * v + 1] = buf[this.off.pinT + 3 * k + 1];
-      s.pinTarget[3 * v + 2] = buf[this.off.pinT + 3 * k + 2];
+    const N = s.numVerts;
+    for (let f = 0; f < this.flagFloats; f++) {
+      const bits = buf[this.off.pin + f] | 0;
+      for (let b = 0; b < 16; b++) {
+        const v = f * 16 + b;
+        if (v >= N) break;
+        const on = (bits >> b) & 1;
+        s.pinned[v] = on;
+        s.invMass[v] = on ? 0 : s.baseInvMass[v];
+        if (on) {
+          s.pinTarget[3 * v] = s.pos[3 * v];
+          s.pinTarget[3 * v + 1] = s.pos[3 * v + 1];
+          s.pinTarget[3 * v + 2] = s.pos[3 * v + 2];
+        }
+      }
     }
   }
 

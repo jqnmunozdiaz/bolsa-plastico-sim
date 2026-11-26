@@ -345,10 +345,29 @@
               <button type="button" data-res="high">Alta<small>8,5k vért.</small></button>
             </div>
           </div>
-          <div class="ctl" data-info="Qué partes del objeto quedan sujetas en el aire. Lo demás cuelga, cae y se mueve libremente. <b>Bolsa</b>: las asas. <b>Lámina</b>: dos esquinas (ropa tendida), todo el borde superior (cortina), el borde izquierdo (bandera en su mástil) o una esquina; <b>Suelta</b> cae plana al suelo. <b>Tela redonda</b>: el centro (cae como un fantasma) o un punto del borde. <b>Cojín</b>: apoyado en el suelo o colgado. Los puntos fijos se pueden <b>arrastrar</b> con el ratón.">
-            <div class="ctl-head"><span class="ctl-name">Puntos fijos</span></div>
+          <div class="section-title">Puntos fijos</div>
+          <div class="ctl" style="border-top:none" data-info="Qué partes del objeto quedan sujetas en el aire; lo demás cuelga, cae y se mueve libremente. <b>Bolsa</b>: las asas. <b>Lámina</b>: dos esquinas (ropa tendida), todo el borde superior (cortina), el borde izquierdo (bandera en su mástil) o una esquina; <b>Suelta</b> cae plana. <b>Tela redonda</b>: el centro o un punto del borde. <b>Cojín</b>: en el suelo o colgado. Si fijas o sueltas puntos a mano (herramienta <b>Fijar / soltar</b>), pasa a <b>personalizado</b>.">
+            <div class="ctl-head"><span class="ctl-name">Preajuste</span><span class="ctl-hint" id="pinHint"></span></div>
             <div class="seg" id="pinSeg"></div>
           </div>
+          <div class="ctl" data-info="Qué hace el ratón sobre la tela. <b>Tirar</b>: arrastrar tira de la tela; arrastrar un punto fijo lo mueve. <b>Fijar / soltar</b>: un clic fija un pequeño trozo donde pulses (punto naranja); un clic sobre un punto fijo lo suelta; mantener pulsado y arrastrar lleva el punto a otro sitio y lo deja fijo allí. Los puntos se pueden mover también con la simulación en marcha.">
+            <div class="ctl-head"><span class="ctl-name">Herramienta del ratón</span></div>
+            <div class="seg" id="toolSeg" style="grid-template-columns: repeat(2, 1fr)">
+              <button type="button" data-tool="pull" class="active">Tirar</button>
+              <button type="button" data-tool="pin">Fijar / soltar</button>
+            </div>
+          </div>
+          <div class="ctl" data-info="Acerca (<b>Juntar</b>) o aleja (<b>Separar</b>) todos los puntos fijos respecto a su centro, un 15 % cada vez. Con el borde superior de una lámina fijo (cortina), juntar forma <b>pliegues</b> como una cortina recogida en su barra.">
+            <div class="ctl-head"><span class="ctl-name">Mover todos los puntos fijos</span></div>
+            <div class="btn-row">
+              <button class="action-btn" id="btnGather" title="Acerca los puntos fijos un 15 % hacia su centro (fruncir)">Juntar</button>
+              <button class="action-btn" id="btnSpread" title="Aleja los puntos fijos un 15 % de su centro">Separar</button>
+            </div>
+          </div>
+          <div class="ctl ctl-check" data-info="Dibuja un punto naranja en cada vértice fijo.">
+            <div class="ctl-head"><label for="chkShowPins">Mostrar puntos fijos</label><input type="checkbox" id="chkShowPins" checked /></div>
+          </div>
+
           <div class="section-title">Obstáculo</div>
           <div class="ctl" data-info="Un objeto sólido sobre el que cae la tela. Ejemplos: <b>mantel</b> = Lámina + Suelta + Mesa; <b>tela sobre una bola</b> = Tela redonda + Suelta + Esfera; <b>funda</b> = Tela redonda + Suelta + Cilindro. Después de elegirlo, pulsa <b>Re-simular pose</b> para dejar caer el objeto desde el principio. No se incluye en el STL.">
             <div class="ctl-head"><span class="ctl-name">Tipo</span></div>
