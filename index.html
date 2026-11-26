@@ -607,6 +607,40 @@
           <div class="ctl ctl-check" data-info="Recorta unos mm del fondo redondeado y lo une a una placa plana de 2 mm. Sin base, la bolsa toca la cama en un solo punto y se despega o vuelca al imprimir.">
             <div class="ctl-head"><label for="chkBase">Base de apoyo</label><input type="checkbox" id="chkBase" checked /></div>
           </div>
+          <div class="ctl ctl-check" data-info="Antes de dar grosor, divide cada triángulo en cuatro y suaviza la superficie (subdivisión de Loop, como en ClothWorks). El STL queda más redondeado y sin facetas, pero tiene 4 veces más triángulos y la reparación tarda unas 4 veces más. Encoge un poco los pliegues muy marcados.">
+            <div class="ctl-head"><label for="chkSmooth">Suavizar (subdivisión)</label><input type="checkbox" id="chkSmooth" /></div>
+          </div>
+
+          <div class="section-title">Modelo 3D</div>
+          <div class="ctl" style="border-top:none" data-info="Exporta la forma actual de la tela (en metros, con el suelo en Y = 0) para usarla en Blender, SketchUp, Unity, etc. <b>GLB</b> conserva color y material; <b>OBJ</b> solo la geometría. A diferencia del STL, es la lámina tal cual (sin grosor ni reparación).">
+            <div class="btn-row">
+              <button class="action-btn" id="btnExportGlb" title="Descarga la forma actual como modelo GLB (con material)">Exportar GLB</button>
+              <button class="action-btn" id="btnExportObj" title="Descarga la forma actual como modelo OBJ (solo geometría)">Exportar OBJ</button>
+            </div>
+          </div>
+          <div class="ctl ctl-check" data-info="Incluye también el obstáculo (mesa, silla, bicicleta…) en el GLB / OBJ.">
+            <div class="ctl-head"><label for="chkExportObstacle">Incluir obstáculo</label><input type="checkbox" id="chkExportObstacle" checked /></div>
+          </div>
+
+          <div class="section-title">Vídeo</div>
+          <div class="ctl" style="border-top:none" data-info="Graba lo que se ve en la escena 3D (sin el panel) en un vídeo WebM. Pulsa otra vez para detener y descargar. Puedes mover la cámara, cambiar el viento o arrastrar la tela mientras grabas.">
+            <button class="action-btn wide" id="btnRecord" title="Empieza a grabar la escena en vídeo">● Grabar vídeo</button>
+          </div>
+
+          <div class="section-title">Escena</div>
+          <div class="ctl" style="border-top:none" data-info="<b>Guardar</b> descarga un archivo con todos los ajustes (objeto, material, viento, obstáculo, aspecto…) y, si está marcado, la forma actual de la tela. <b>Abrir</b> lo vuelve a cargar. <b>Copiar enlace</b> copia una dirección web con los ajustes (sin la forma) para compartirla: quien la abra verá la misma escena simularse.">
+            <div class="btn-row">
+              <button class="action-btn" id="btnSaveScene" title="Descarga la escena en un archivo JSON">Guardar escena</button>
+              <button class="action-btn" id="btnLoadScene" title="Carga una escena guardada">Abrir escena</button>
+            </div>
+            <div class="btn-row">
+              <button class="action-btn" id="btnShareScene" style="grid-column: span 2" title="Copia un enlace con los ajustes actuales">Copiar enlace para compartir</button>
+            </div>
+            <input type="file" id="fileScene" accept="application/json,.json" hidden />
+          </div>
+          <div class="ctl ctl-check" data-info="Guarda también la forma de la tela en este instante (arrugas incluidas), para retomarla o exportarla más tarde. Sin ella, al abrir la escena se vuelve a simular desde el principio.">
+            <div class="ctl-head"><label for="chkSaveShape">Guardar también la forma actual</label><input type="checkbox" id="chkSaveShape" checked /></div>
+          </div>
         </section>
       </div>
     </div>

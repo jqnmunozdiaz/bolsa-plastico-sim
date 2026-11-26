@@ -102,5 +102,7 @@ export function setupCollider({ scene, floorY, getSolver }) {
   return {
     /** Gives a freshly built solver the current obstacle. */
     attach: (solver) => solver.setCollider(settings()),
+    /** The drawn obstacle (for 3D exports). */
+    group,
   };
 }

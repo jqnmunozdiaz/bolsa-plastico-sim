@@ -11,6 +11,7 @@ import { setupPanel, getControlValue, setControlValue } from './panel.js';
 import { setupAppearance } from './appearance.js';
 import { setupMaterials } from './materials.js';
 import { setupCollider } from './collider.js';
+import { exportGLB, exportOBJ, createRecorder, downloadBlob } from './exporters.js';
 
 /**
  * Generates a procedural fine HDPE extrusion-ripple bump texture
@@ -687,7 +688,7 @@ btnDownloadStl.addEventListener('click', async () => {
     const { stl, info } = await runStlWorker(
       P.slice(),
       new Uint32Array(bagData.indices),
-      { wall: wallMm, base: chkBase.checked, maxMm: MAX_MM }
+      { wall: wallMm, base: chkBase.checked, maxMm: MAX_MM, smooth: document.getElementById('chkSmooth').checked }
     );
     downloadBuffer(stl, filename);
     stlResult = `STL ${info.sizeMm.map((v) => v.toFixed(0)).join(' × ')} mm, ${info.volumeCm3.toFixed(0)} cm³, sin errores`;
@@ -959,6 +960,208 @@ const appearance = setupAppearance({
 setupMaterials(appearance);
 collider = setupCollider({ scene, floorY: SOLVER_FIXED.floorY, getSolver: () => solver });
 buildObject('bag', 'low');
+
+// ---- 3D model export, video, save / load / share ----
+const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+const baseName = () => `${OBJECTS[currentObj].file}-${currentRes}`;
+
+document.getElementById('btnExportGlb').addEventListener('click', async () => {
+  try {
+    const glb = await exportGLB(bagMesh, collider.group, document.getElementById('chkExportObstacle').checked, SOLVER_FIXED.floorY);
+    downloadBlob(glb, `${baseName()}.glb`, 'model/gltf-binary');
+  } catch (err) {
+    console.warn(err);
+    window.alert(`No se pudo exportar el GLB: ${err.message ?? err}`);
+  }
+});
+document.getElementById('btnExportObj').addEventListener('click', () => {
+  const obj = exportOBJ(bagMesh, collider.group, document.getElementById('chkExportObstacle').checked, SOLVER_FIXED.floorY);
+  downloadBlob(obj, `${baseName()}.obj`, 'text/plain');
+});
+
+const btnRecord = document.getElementById('btnRecord');
+const recorder = createRecorder(renderer.domElement, {
+  onStop: (blob) => downloadBlob(blob, `simulacion-${baseName()}-${stamp()}.webm`, 'video/webm'),
+});
+let recordTimer = null;
+if (!recorder.supported) {
+  btnRecord.disabled = true;
+  btnRecord.title = 'Este navegador no permite grabar vídeo del lienzo';
+}
+btnRecord.addEventListener('click', () => {
+  if (recorder.active) {
+    recorder.stop();
+    clearInterval(recordTimer);
+    btnRecord.textContent = '● Grabar vídeo';
+    btnRecord.classList.remove('toggled');
+    return;
+  }
+  recorder.start();
+  btnRecord.classList.add('toggled');
+  const tick = () => {
+    const s = Math.floor(recorder.seconds);
+    btnRecord.textContent = `■ Detener y descargar (${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')})`;
+  };
+  tick();
+  recordTimer = setInterval(tick, 500);
+});
+
+function encodeF32(arr) {
+  const u8 = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function decodeF32(b64) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Float32Array(u8.buffer);
+}
+
+/** Every setting of the panel (not the simulation state). */
+function collectSettings() {
+  const panel = document.getElementById('hudPanel');
+  const sliders = {};
+  for (const el of panel.querySelectorAll('input[type="range"]')) {
+    if (el.id && el.id !== 'sliderTime') sliders[el.id] = Number(getControlValue(el.id).toPrecision(6));
+  }
+  const checks = {};
+  for (const el of panel.querySelectorAll('input[type="checkbox"]')) if (el.id) checks[el.id] = el.checked;
+  return {
+    app: 'simulador-laminas',
+    version: 1,
+    object: currentObj,
+    res: currentRes,
+    pinMode: pinModeId,
+    customPins: pinModeId === 'custom' ? [...customPins] : undefined,
+    quality,
+    obstacle: document.getElementById('colType').value,
+    material: document.getElementById('selMaterial').value,
+    sliders,
+    checks,
+    look: appearance.getState(),
+  };
+}
+
+/** Restores settings and rebuilds the object (it then simulates from its starting pose). */
+function applySettings(s) {
+  if (!s || typeof s !== 'object') throw new Error('archivo de escena no válido');
+  const $ = (id) => document.getElementById(id);
+  const colSel = $('colType');
+  if (typeof s.obstacle === 'string' && [...colSel.options].some((o) => o.value === s.obstacle)) {
+    colSel.value = s.obstacle;
+    colSel.dispatchEvent(new Event('change')); // sets its suggested scale; saved values follow
+  }
+  for (const [id, v] of Object.entries(s.sliders ?? {})) {
+    const el = $(id);
+    if (el && el.type === 'range' && id !== 'sliderTime' && Number.isFinite(v)) setControlValue(id, v);
+  }
+  for (const [id, v] of Object.entries(s.checks ?? {})) {
+    const el = $(id);
+    if (el && el.type === 'checkbox' && el.checked !== !!v) {
+      el.checked = !!v;
+      el.dispatchEvent(new Event('change'));
+    }
+  }
+  const matSel = $('selMaterial');
+  if (typeof s.material === 'string' && [...matSel.options].some((o) => o.value === s.material)) matSel.value = s.material;
+  if (s.look) appearance.setState(s.look);
+  if (['fast', 'normal', 'high'].includes(s.quality)) document.querySelector(`#qualitySeg [data-quality="${s.quality}"]`).click();
+
+  const objKey = OBJECTS[s.object] ? s.object : currentObj;
+  const resKey = ['low', 'mid', 'high'].includes(s.res) ? s.res : currentRes;
+  buildObject(objKey, resKey);
+  if (s.pinMode === 'custom' && Array.isArray(s.customPins)) {
+    pinModeId = 'custom';
+    customPins = new Set(s.customPins.filter((i) => Number.isInteger(i) && i >= 0 && i < solver.numVerts));
+  } else if (OBJECTS[objKey].pinModes.some((m) => m.id === s.pinMode)) {
+    pinModeId = s.pinMode;
+  }
+  renderPinSeg();
+  startObject();
+  if (pinModeId === 'custom' && !solver.isWarmingUp()) showPinModeFromSolver();
+  refreshStatus();
+}
+
+/** Restores a saved cloth shape (same object and resolution) and pauses on it. */
+function applyShape(st) {
+  if (!st || st.numVerts !== solver.numVerts) return false;
+  const pos = decodeF32(st.pos);
+  if (pos.length !== solver.pos.length || pos.some((v) => !Number.isFinite(v))) return false;
+  solver.cancelReferencePose();
+  solver.pos.set(pos);
+  solver.prevPos.set(pos);
+  solver.vel.fill(0);
+  if (st.rest) {
+    const rest = decodeF32(st.rest);
+    if (rest.length === solver.bendRestAngle.length) solver.bendRestAngle.set(rest);
+  }
+  solver.setPinnedSet(new Set((st.pinned ?? []).filter((i) => Number.isInteger(i) && i >= 0 && i < solver.numVerts)));
+  showPinModeFromSolver();
+  resetHistory();
+  simTime = Number(st.simTime) || 0;
+  history.record(simTime);
+  refreshTimeline();
+  syncGeometry();
+  setPaused(true);
+  return true;
+}
+
+document.getElementById('btnSaveScene').addEventListener('click', () => {
+  const data = collectSettings();
+  if (document.getElementById('chkSaveShape').checked) {
+    data.shape = {
+      numVerts: solver.numVerts,
+      simTime,
+      pos: encodeF32(solver.pos),
+      rest: encodeF32(solver.bendRestAngle),
+      pinned: [...solver.pinnedSet()],
+    };
+  }
+  downloadBlob(JSON.stringify(data), `escena-${baseName()}-${stamp()}.json`, 'application/json');
+});
+document.getElementById('btnLoadScene').addEventListener('click', () => document.getElementById('fileScene').click());
+document.getElementById('fileScene').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    if (file.size > 50e6) throw new Error('archivo demasiado grande');
+    const data = JSON.parse(await file.text());
+    applySettings(data);
+    if (data.shape && !applyShape(data.shape)) {
+      window.alert('Se cargaron los ajustes, pero la forma guardada no corresponde a este objeto y resolución.');
+    }
+  } catch (err) {
+    window.alert(`No se pudo abrir la escena: ${err.message}`);
+  }
+});
+
+const toB64Url = (str) => btoa(unescape(encodeURIComponent(str))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const fromB64Url = (b) => decodeURIComponent(escape(atob(b.replace(/-/g, '+').replace(/_/g, '/'))));
+
+document.getElementById('btnShareScene').addEventListener('click', async () => {
+  const s = collectSettings();
+  if (s.customPins && s.customPins.length > 400) s.customPins = undefined; // keep the link short
+  const url = `${location.origin}${location.pathname}#escena=${toB64Url(JSON.stringify(s))}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    statsBar.textContent = 'Enlace copiado: pégalo donde quieras compartir la escena';
+  } catch {
+    window.prompt('Copia este enlace:', url);
+  }
+});
+
+// Opening a shared link: apply its settings
+const sharedMatch = /[#&]escena=([^&]+)/.exec(location.hash);
+if (sharedMatch) {
+  try {
+    applySettings(JSON.parse(fromB64Url(sharedMatch[1])));
+  } catch (err) {
+    console.warn('Enlace de escena no válido', err);
+  }
+}
 
 // 6. Animation Loop
 window.addEventListener('resize', () => {

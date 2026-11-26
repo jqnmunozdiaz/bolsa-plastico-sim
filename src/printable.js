@@ -15,11 +15,12 @@ import { computeShellOffsets } from './shellOffsets.js';
  * @param wasm      initialised manifold-3d module
  * @param P         Float32Array xyz in mm, Z-up
  * @param idx       Uint32Array triangle indices (outward winding)
- * @param options   { wall, base, maxMm }
+ * @param options   { wall, base, maxMm, smooth } (smooth: one level of Loop subdivision first)
  * @param progress  callback(stepLabel)
  */
 export function buildPrintableSolid(wasm, P, idx, options = {}, progress = () => {}) {
   const { Manifold, CrossSection } = wasm;
+  if (options.smooth) ({ P, idx } = loopSubdivide(P, idx));
   const wall = options.wall ?? 1.2;
   const useBase = options.base ?? true;
   const maxMm = options.maxMm ?? 240 * 0.9995;
@@ -165,6 +166,74 @@ function separateTouchingVertices(positions, triVerts, dist) {
     moved++;
   }
   return moved;
+}
+
+/**
+ * One level of Loop subdivision: every triangle becomes four and the surface is smoothed
+ * (new edge points: 3/8 of the edge ends + 1/8 of the opposite corners; old points move towards
+ * their neighbours). Borders are smoothed along the border only, so open edges stay put.
+ */
+export function loopSubdivide(P, idx) {
+  const nv = P.length / 3;
+  const T = idx.length / 3;
+  const edges = new Map(); // key -> { a, b, opp: [], id }
+  const key = (a, b) => (a < b ? a * 4294967296 + b : b * 4294967296 + a);
+  for (let t = 0; t < T; t++) {
+    for (let k = 0; k < 3; k++) {
+      const a = idx[3 * t + k], b = idx[3 * t + ((k + 1) % 3)], c = idx[3 * t + ((k + 2) % 3)];
+      const kk = key(a, b);
+      let e = edges.get(kk);
+      if (!e) edges.set(kk, (e = { a, b, opp: [], id: -1 }));
+      e.opp.push(c);
+    }
+  }
+  const out = new Float32Array(3 * (nv + edges.size));
+  // Neighbour sums: all neighbours, and border neighbours (edges with one triangle)
+  const nSum = new Float64Array(3 * nv), nCnt = new Int32Array(nv);
+  const bSum = new Float64Array(3 * nv), bCnt = new Int32Array(nv);
+  let next = nv;
+  for (const e of edges.values()) {
+    e.id = next++;
+    const { a, b } = e;
+    for (let k = 0; k < 3; k++) {
+      nSum[3 * a + k] += P[3 * b + k];
+      nSum[3 * b + k] += P[3 * a + k];
+    }
+    nCnt[a]++;
+    nCnt[b]++;
+    const border = e.opp.length !== 2;
+    if (border) {
+      for (let k = 0; k < 3; k++) {
+        bSum[3 * a + k] += P[3 * b + k];
+        bSum[3 * b + k] += P[3 * a + k];
+      }
+      bCnt[a]++;
+      bCnt[b]++;
+    }
+    for (let k = 0; k < 3; k++) {
+      out[3 * e.id + k] = border
+        ? 0.5 * (P[3 * a + k] + P[3 * b + k])
+        : 0.375 * (P[3 * a + k] + P[3 * b + k]) + 0.125 * (P[3 * e.opp[0] + k] + P[3 * e.opp[1] + k]);
+    }
+  }
+  for (let v = 0; v < nv; v++) {
+    if (bCnt[v] === 2) {
+      for (let k = 0; k < 3; k++) out[3 * v + k] = 0.75 * P[3 * v + k] + 0.125 * bSum[3 * v + k];
+    } else if (bCnt[v] > 0 || nCnt[v] < 3) {
+      for (let k = 0; k < 3; k++) out[3 * v + k] = P[3 * v + k]; // corner / non-manifold: keep
+    } else {
+      const n = nCnt[v];
+      const beta = n === 3 ? 3 / 16 : 3 / (8 * n);
+      for (let k = 0; k < 3; k++) out[3 * v + k] = (1 - n * beta) * P[3 * v + k] + beta * nSum[3 * v + k];
+    }
+  }
+  const outIdx = new Uint32Array(12 * T);
+  for (let t = 0; t < T; t++) {
+    const a = idx[3 * t], b = idx[3 * t + 1], c = idx[3 * t + 2];
+    const ab = edges.get(key(a, b)).id, bc = edges.get(key(b, c)).id, ca = edges.get(key(c, a)).id;
+    outIdx.set([a, ab, ca, b, bc, ab, c, ca, bc, ab, bc, ca], 12 * t);
+  }
+  return { P: out, idx: outIdx };
 }
 
 /**

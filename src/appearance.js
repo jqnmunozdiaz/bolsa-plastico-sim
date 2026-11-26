@@ -308,5 +308,13 @@ export function setupAppearance(ctx) {
     getLook: () => ({ bagColor: state.bagColor, opacity: state.opacity, shine: state.shine, metal: state.metal }),
     /** Applies a material look (used by the material presets). */
     setLook: (look) => update({ ...look }),
+    /** Whole scene look, for saving / sharing scenes. */
+    getState: () => ({ ...state }),
+    /** Restores a saved look (unknown keys are ignored). */
+    setState: (st) => {
+      const clean = {};
+      for (const k of Object.keys(DEFAULTS)) if (st && k in st && typeof st[k] === typeof DEFAULTS[k]) clean[k] = st[k];
+      update(clean);
+    },
   };
 }
