@@ -369,34 +369,29 @@
           </div>
 
           <div class="section-title">Obstáculo</div>
-          <div class="ctl" data-info="Un objeto sólido sobre el que cae la tela. Ejemplos: <b>mantel</b> = Lámina + Suelta + Mesa; <b>tela sobre una bola</b> = Tela redonda + Suelta + Esfera; <b>funda</b> = Tela redonda + Suelta + Cilindro. Después de elegirlo, pulsa <b>Re-simular pose</b> para dejar caer el objeto desde el principio. No se incluye en el STL.">
-            <div class="ctl-head"><span class="ctl-name">Tipo</span></div>
-            <div class="seg seg-4" id="colSeg">
-              <button type="button" data-col="none" class="active">Ninguno</button>
-              <button type="button" data-col="sphere">Esfera</button>
-              <button type="button" data-col="table">Mesa</button>
-              <button type="button" data-col="cylinder">Cilindro</button>
-            </div>
+          <div class="ctl" style="border-top:none" data-info="Un objeto sólido sobre el que cae la tela: formas simples (esfera, bloque, cilindro) u objetos cotidianos (mesa con patas, silla, impresora 3D, bicicleta, botella). Cada uno trae una escala que encaja con telas de 50–70 cm. Ejemplos: <b>mantel</b> = Lámina + Suelta + Mesa; <b>sábana sobre la bici</b> = Lámina + Suelta + Bicicleta; <b>funda de botella</b> = Tela redonda + Suelta + Botella. Las telas sueltas empiezan por encima del obstáculo; pulsa <b>Re-simular pose</b> para dejarlas caer. No se incluye en el STL.">
+            <div class="ctl-head"><label for="colType">Tipo</label><span class="ctl-hint" id="colSizeHint" style="margin-left:auto"></span></div>
+            <select id="colType" class="ctl-select"></select>
           </div>
-          <div class="ctl" data-info="Diámetro de la esfera o del cilindro, o lado de la mesa (cuadrada), en metros. La lámina mide 70 × 50 cm y la tela redonda 60 cm.">
-            <div class="ctl-head"><label for="sliderColSize">Tamaño</label></div>
-            <input type="range" id="sliderColSize" min="0.1" max="0.8" step="0.01" value="0.35" data-unit="m" disabled />
+          <div class="ctl" data-info="Tamaño del obstáculo respecto a su tamaño real (1 = real: mesa de 120 × 80 cm, silla de 90 cm de alto, bicicleta de 1,7 m, botella de 30 cm). Al elegir un obstáculo se pone una escala adecuada para las telas del simulador.">
+            <div class="ctl-head"><label for="sliderColScale">Escala</label></div>
+            <input type="range" id="sliderColScale" min="0.2" max="2" step="0.01" value="1" data-unit="×" disabled />
           </div>
-          <div class="ctl" data-info="Altura de la parte más alta del obstáculo sobre el suelo, en metros. Los objetos sueltos empiezan a unos 45–60 cm, así que un obstáculo más bajo deja espacio para la caída.">
-            <div class="ctl-head"><label for="sliderColHeight">Altura</label></div>
-            <input type="range" id="sliderColHeight" min="0.05" max="0.7" step="0.01" value="0.3" data-unit="m" disabled />
+          <div class="ctl" data-info="Giro del obstáculo alrededor del eje vertical, en grados.">
+            <div class="ctl-head"><label for="sliderColRot">Rotación</label></div>
+            <input type="range" id="sliderColRot" min="0" max="355" step="5" value="0" data-unit="°" disabled />
           </div>
           <div class="ctl" data-info="Posición del obstáculo a izquierda (negativo) o derecha (positivo), vista desde la cámara inicial.">
             <div class="ctl-head"><label for="sliderColX">Posición X</label></div>
-            <input type="range" id="sliderColX" min="-0.4" max="0.4" step="0.01" value="0" data-unit="m" disabled />
+            <input type="range" id="sliderColX" min="-0.5" max="0.5" step="0.01" value="0" data-unit="m" disabled />
           </div>
           <div class="ctl" data-info="Posición del obstáculo hacia la cámara (positivo) o hacia el fondo (negativo).">
             <div class="ctl-head"><label for="sliderColZ">Posición Z</label></div>
-            <input type="range" id="sliderColZ" min="-0.4" max="0.4" step="0.01" value="0" data-unit="m" disabled />
+            <input type="range" id="sliderColZ" min="-0.5" max="0.5" step="0.01" value="0" data-unit="m" disabled />
           </div>
           <div class="ctl" data-info="Rozamiento entre la tela y el obstáculo. <b>0</b> = resbala y cae; <b>1</b> = se queda agarrada donde toca (un mantel no se desliza de la mesa).">
             <div class="ctl-head"><label for="sliderColFriction">Fricción</label></div>
-            <input type="range" id="sliderColFriction" min="0" max="1" step="0.05" value="0.5" disabled />
+            <input type="range" id="sliderColFriction" min="0" max="1" step="0.05" value="0.8" disabled />
           </div>
 
           <div class="section-title">Tiempo y fuerzas</div>

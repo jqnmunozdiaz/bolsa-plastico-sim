@@ -194,9 +194,9 @@ export class XPBDBagSolver {
     // Temporary external sculpt/gust forces (used for reference pose warm-up or air gusts)
     this.extForces = new Float32Array(N * 3);
 
-    // Optional solid obstacle: { type: 'sphere' | 'table' | 'cylinder', x, z, size, height, friction }
-    // size = diameter / width (m), height = top above the floor (m)
+    // Optional obstacle made of solid pieces (see setCollider)
     this.collider = null;
+    this.colliderTop = -Infinity;
   }
 
   _computeDihedralAngle(p, i0, i1, i2, i3) {
@@ -807,68 +807,172 @@ export class XPBDBagSolver {
     }
   }
 
+  /**
+   * Obstacle made of solid pieces (see obstacles.js), placed at (x, z) on the floor, rotated about
+   * the vertical axis by rot degrees and scaled uniformly. null / no pieces = no obstacle.
+   */
   setCollider(c) {
-    this.collider = c && c.type && c.type !== 'none' ? { ...c } : null;
+    if (!c || !c.parts || c.parts.length === 0) {
+      this.collider = null;
+      this.colliderTop = -Infinity;
+      return;
+    }
+    const rot = ((c.rot ?? 0) * Math.PI) / 180;
+    const s = Math.max(0.01, c.scale ?? 1);
+    const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    const grow = (p, r) => {
+      for (let k = 0; k < 3; k++) {
+        mn[k] = Math.min(mn[k], p[k] - r);
+        mx[k] = Math.max(mx[k], p[k] + r);
+      }
+    };
+    for (const q of c.parts) {
+      if (q.type === 'box') { grow([q.c[0] - q.h[0], q.c[1] - q.h[1], q.c[2] - q.h[2]], 0); grow([q.c[0] + q.h[0], q.c[1] + q.h[1], q.c[2] + q.h[2]], 0); }
+      else if (q.type === 'sphere') grow(q.c, q.r);
+      else if (q.type === 'capsule') { grow(q.a, q.r); grow(q.b, q.r); }
+      else if (q.type === 'cyl') { grow([q.c[0], q.y0, q.c[1]], q.r); grow([q.c[0], q.y1, q.c[1]], q.r); }
+    }
+    // Per-piece bounding boxes (local, grown by the margin) to skip far pieces quickly
+    const m = 0.006 / s;
+    const pb = new Float32Array(6 * c.parts.length);
+    c.parts.forEach((q, k) => {
+      let a, b;
+      if (q.type === 'box') { a = q.c.map((v, i) => v - q.h[i]); b = q.c.map((v, i) => v + q.h[i]); }
+      else if (q.type === 'sphere') { a = q.c.map((v) => v - q.r); b = q.c.map((v) => v + q.r); }
+      else if (q.type === 'capsule') { a = q.a.map((v, i) => Math.min(v, q.b[i]) - q.r); b = q.a.map((v, i) => Math.max(v, q.b[i]) + q.r); }
+      else { a = [q.c[0] - q.r, q.y0, q.c[1] - q.r]; b = [q.c[0] + q.r, q.y1, q.c[1] + q.r]; }
+      for (let i = 0; i < 3; i++) { pb[6 * k + i] = a[i] - m; pb[6 * k + 3 + i] = b[i] + m; }
+    });
+    this.collider = {
+      parts: c.parts, x: c.x ?? 0, z: c.z ?? 0, scale: s, cos: Math.cos(rot), sin: Math.sin(rot),
+      friction: c.friction ?? 0.8, min: mn, max: mx, pb,
+    };
+    // Highest point (world y): loose cloth starts above it
+    this.colliderTop = this.params.floorY + mx[1] * s;
   }
 
   /**
-   * Pushes free vertices out of the obstacle (plus a small margin for the film thickness) along the
-   * shortest way out, and applies friction to the motion along its surface.
+   * Pushes a point (local obstacle frame, in L[0..2]) out of every piece it overlaps, along the
+   * shortest way out. Returns true if it moved; the last surface normal is left in N[0..2].
+   */
+  _pushOutLocal(L, N, m) {
+    const c = this.collider;
+    const parts = c.parts, pb = c.pb;
+    let lx = L[0], ly = L[1], lz = L[2];
+    let hit = false;
+    for (let k = 0; k < parts.length; k++) {
+      const o = 6 * k;
+      if (lx < pb[o] || lx > pb[o + 3] || ly < pb[o + 1] || ly > pb[o + 4] || lz < pb[o + 2] || lz > pb[o + 5]) continue;
+      const q = parts[k];
+      if (q.type === 'sphere') {
+        const ex = lx - q.c[0], ey = ly - q.c[1], ez = lz - q.c[2];
+        const R = q.r + m, d2 = ex * ex + ey * ey + ez * ez;
+        if (d2 >= R * R) continue;
+        const d = Math.sqrt(d2) || 1e-9;
+        N[0] = ex / d; N[1] = ey / d; N[2] = ez / d;
+        lx = q.c[0] + N[0] * R; ly = q.c[1] + N[1] * R; lz = q.c[2] + N[2] * R;
+      } else if (q.type === 'box') {
+        const ex = lx - q.c[0], ey = ly - q.c[1], ez = lz - q.c[2];
+        const px = q.h[0] + m - Math.abs(ex), pz = q.h[2] + m - Math.abs(ez);
+        let py = q.h[1] + m - Math.abs(ey);
+        if (px <= 0 || py <= 0 || pz <= 0) continue;
+        // A box standing on the floor never pushes downwards (the floor would push back: jitter)
+        if (ey < 0 && q.c[1] - q.h[1] <= 1e-3) py = Infinity;
+        N[0] = 0; N[1] = 0; N[2] = 0;
+        if (py <= px && py <= pz) { N[1] = ey >= 0 ? 1 : -1; ly = q.c[1] + N[1] * (q.h[1] + m); }
+        else if (px <= pz) { N[0] = ex >= 0 ? 1 : -1; lx = q.c[0] + N[0] * (q.h[0] + m); }
+        else { N[2] = ez >= 0 ? 1 : -1; lz = q.c[2] + N[2] * (q.h[2] + m); }
+      } else if (q.type === 'capsule') {
+        const ax = q.a[0], ay = q.a[1], az = q.a[2];
+        const bx = q.b[0] - ax, by = q.b[1] - ay, bz = q.b[2] - az;
+        const bb = bx * bx + by * by + bz * bz;
+        let t = bb > 0 ? ((lx - ax) * bx + (ly - ay) * by + (lz - az) * bz) / bb : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const cx = ax + bx * t, cy = ay + by * t, cz = az + bz * t;
+        const ex = lx - cx, ey = ly - cy, ez = lz - cz;
+        const R = q.r + m, d2 = ex * ex + ey * ey + ez * ez;
+        if (d2 >= R * R) continue;
+        const d = Math.sqrt(d2);
+        if (d < 1e-9) { N[0] = 0; N[1] = 1; N[2] = 0; } else { N[0] = ex / d; N[1] = ey / d; N[2] = ez / d; }
+        lx = cx + N[0] * R; ly = cy + N[1] * R; lz = cz + N[2] * R;
+      } else if (q.type === 'cyl') {
+        const ex = lx - q.c[0], ez = lz - q.c[1];
+        const r = Math.sqrt(ex * ex + ez * ez);
+        const R = q.r + m;
+        if (r >= R || ly >= q.y1 + m || ly <= q.y0 - m) continue;
+        const penTop = q.y1 + m - ly, penBot = q.y0 > 0 ? ly - (q.y0 - m) : Infinity, penSide = R - r;
+        N[0] = 0; N[1] = 0; N[2] = 0;
+        if (penTop <= penSide && penTop <= penBot) { N[1] = 1; ly = q.y1 + m; }
+        else if (penBot <= penSide) { N[1] = -1; ly = q.y0 - m; }
+        else {
+          if (r < 1e-9) { N[0] = 1; } else { N[0] = ex / r; N[2] = ez / r; }
+          lx = q.c[0] + N[0] * R; lz = q.c[1] + N[2] * R;
+        }
+      } else continue;
+      hit = true;
+    }
+    L[0] = lx; L[1] = ly; L[2] = lz;
+    return hit;
+  }
+
+  /**
+   * Pushes free vertices out of the obstacle (plus a small margin for the film thickness) and
+   * applies friction to the motion along its surface. Works in the obstacle's own frame
+   * (unrotated, unscaled). After friction the point is projected once more, so on small curved
+   * pieces (tubes) friction never leaves it slightly inside (which made the cloth jitter).
    */
   _solveCollider() {
     const c = this.collider;
-    const margin = 0.006;
+    const s = c.scale, cs = c.cos, sn = c.sin;
+    const m = 0.006 / s; // margin in local units
+    const fr = Math.max(0, Math.min(1, c.friction));
     const fy = this.params.floorY;
-    const fr = Math.max(0, Math.min(1, c.friction ?? 0.5));
-    const half = c.size / 2;
-    const top = fy + c.height + margin;
-    const R = half + margin;
-    // Sphere centre: its top is at `height`
-    const scy = fy + c.height - half;
     const p = this.pos;
+    const L = this._colL ?? (this._colL = new Float64Array(3));
+    const Nn = this._colN ?? (this._colN = new Float64Array(3));
+    const toLocal = (wx, wy, wz) => {
+      const dx = wx - c.x, dz = wz - c.z;
+      L[0] = (dx * cs - dz * sn) / s;
+      L[1] = (wy - fy) / s;
+      L[2] = (dx * sn + dz * cs) / s;
+    };
+    const mu = 2 * fr; // friction coefficient (slider 0..1 -> 0..2)
     for (let i = 0; i < this.numVerts; i++) {
       if (this.pinned[i]) continue;
       const ix = 3 * i;
-      const dx = p[ix] - c.x, dy = p[ix + 1] - (c.type === 'sphere' ? scy : 0), dz = p[ix + 2] - c.z;
-      let nx = 0, ny = 0, nz = 0;
-      let tx, ty, tz; // corrected position
-      if (c.type === 'sphere') {
-        const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 >= R * R) continue;
-        const d = Math.sqrt(d2);
-        if (d < 1e-9) { nx = 0; ny = 1; nz = 0; } else { nx = dx / d; ny = dy / d; nz = dz / d; }
-        tx = c.x + nx * R; ty = scy + ny * R; tz = c.z + nz * R;
-      } else {
-        const y = p[ix + 1];
-        if (y >= top) continue;
-        const penTop = top - y;
-        if (c.type === 'table') {
-          const ax = Math.abs(dx), az = Math.abs(dz);
-          if (ax >= R || az >= R) continue;
-          const penX = R - ax, penZ = R - az;
-          tx = p[ix]; ty = y; tz = p[ix + 2];
-          if (penTop <= penX && penTop <= penZ) { ty = top; ny = 1; }
-          else if (penX <= penZ) { nx = Math.sign(dx) || 1; tx = c.x + nx * R; }
-          else { nz = Math.sign(dz) || 1; tz = c.z + nz * R; }
-        } else {
-          // cylinder (vertical axis)
-          const r = Math.sqrt(dx * dx + dz * dz);
-          if (r >= R) continue;
-          const penSide = R - r;
-          tx = p[ix]; ty = y; tz = p[ix + 2];
-          if (penTop <= penSide) { ty = top; ny = 1; }
-          else {
-            if (r < 1e-9) { nx = 1; nz = 0; } else { nx = dx / r; nz = dz / r; }
-            tx = c.x + nx * R; tz = c.z + nz * R;
-          }
-        }
-      }
-      // Friction: remove part of this substep's sliding along the surface
+      const ox = p[ix], oy = p[ix + 1], oz = p[ix + 2];
+      toLocal(ox, oy, oz);
+      if (L[0] < c.min[0] - m || L[0] > c.max[0] + m || L[1] < c.min[1] - m || L[1] > c.max[1] + m ||
+          L[2] < c.min[2] - m || L[2] > c.max[2] + m) continue;
+      if (!this._pushOutLocal(L, Nn, m)) continue;
+      // local -> world (scale, rotate by +rot)
+      let wx0 = L[0] * s, wz0 = L[2] * s;
+      const tx = c.x + wx0 * cs + wz0 * sn;
+      const ty = fy + L[1] * s;
+      const tz = c.z - wx0 * sn + wz0 * cs;
+      const wnx = Nn[0] * cs + Nn[2] * sn, wny = Nn[1], wnz = -Nn[0] * sn + Nn[2] * cs;
+      // Position-based friction (Macklin et al. 2014): the sliding of this substep is cancelled
+      // while it is smaller than mu x penetration depth (static), otherwise reduced by that amount
+      const depth = Math.hypot(tx - ox, ty - oy, tz - oz);
       const mx = tx - this.prevPos[ix], my = ty - this.prevPos[ix + 1], mz = tz - this.prevPos[ix + 2];
-      const mn = mx * nx + my * ny + mz * nz;
-      p[ix] = tx - (mx - mn * nx) * fr;
-      p[ix + 1] = ty - (my - mn * ny) * fr;
-      p[ix + 2] = tz - (mz - mn * nz) * fr;
+      const mn = mx * wnx + my * wny + mz * wnz;
+      const sx = mx - mn * wnx, sy = my - mn * wny, sz = mz - mn * wnz; // tangential sliding
+      const slide = Math.hypot(sx, sy, sz);
+      const k = slide > 1e-12 ? Math.min(1, (mu * depth) / slide) : 0;
+      let fx = tx - sx * k;
+      let fyy = ty - sy * k;
+      let fz = tz - sz * k;
+      // Make sure friction did not put it back inside a curved piece
+      toLocal(fx, fyy, fz);
+      if (this._pushOutLocal(L, Nn, m)) {
+        wx0 = L[0] * s; wz0 = L[2] * s;
+        fx = c.x + wx0 * cs + wz0 * sn;
+        fyy = fy + L[1] * s;
+        fz = c.z - wx0 * sn + wz0 * cs;
+      }
+      p[ix] = fx;
+      p[ix + 1] = fyy;
+      p[ix + 2] = fz;
     }
   }
 

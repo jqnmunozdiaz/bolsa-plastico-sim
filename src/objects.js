@@ -58,10 +58,11 @@ export const OBJECTS = {
     place(solver, groups) {
       solver.resetToRest();
       if (groups.length === 0) {
-        // Nothing holds it: start horizontal, 45 cm above the floor, and let it drop
+        // Nothing holds it: start horizontal, 45 cm up (or just above the obstacle) and let it drop
+        const y0 = Math.max(0.45, solver.colliderTop + 0.08);
         for (let i = 0; i < solver.numVerts; i++) {
           const y = solver.pos[3 * i + 1];
-          solver.pos[3 * i + 1] = 0.45;
+          solver.pos[3 * i + 1] = y0;
           solver.pos[3 * i + 2] = 0.47 - y; // rest y 0.22..0.72 -> z -0.25..0.25
         }
         ripple(solver, 1);
@@ -85,6 +86,9 @@ export const OBJECTS = {
     pressure: 0,
     place(solver, groups) {
       solver.resetToRest();
+      // Start above a tall obstacle (rest height 62 cm)
+      const lift = Math.max(0, solver.colliderTop + 0.08 - 0.62);
+      for (let i = 0; i < solver.numVerts; i++) solver.pos[3 * i + 1] += lift;
       ripple(solver, 1);
       solver.setPinnedGroups(groups);
     },
@@ -103,7 +107,7 @@ export const OBJECTS = {
     place(solver, groups) {
       solver.resetToRest();
       // Resting just above the floor, or lifted so it can hang from the corner
-      const lift = groups.length ? 0.5 : -0.04 + 0.02;
+      const lift = Math.max(groups.length ? 0.5 : -0.04 + 0.02, solver.colliderTop + 0.06);
       for (let i = 0; i < solver.numVerts; i++) solver.pos[3 * i + 1] += lift;
       solver.prevPos.set(solver.pos);
       solver.setPinnedGroups(groups);
