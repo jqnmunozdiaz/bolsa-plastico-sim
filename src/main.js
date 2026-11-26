@@ -10,6 +10,7 @@ import StlWorker from './stlWorker.js?worker&inline';
 import { setupPanel, getControlValue, setControlValue } from './panel.js';
 import { setupAppearance } from './appearance.js';
 import { setupMaterials } from './materials.js';
+import { setupCollider } from './collider.js';
 
 /**
  * Generates a procedural fine HDPE extrusion-ripple bump texture
@@ -124,6 +125,7 @@ const SOLVER_FIXED = { thickness: 0.0085, floorY: -0.04, substeps: 7 };
 let currentObj = 'bag';
 let currentRes = 'low';
 let pinModeId = OBJECTS.bag.pinModes[0].id;
+let collider = null; // obstacle controls + mesh (set up before the first object is built)
 let bagData = null;
 let solver = null;
 let posAttr = null;
@@ -212,6 +214,7 @@ function buildObject(objKey, resKey) {
   if (objKey !== currentObj) pinModeId = obj.pinModes[0].id;
   bagData = obj.build(obj.resolutions[resKey]);
   solver = new XPBDBagSolver(bagData, { ...SOLVER_FIXED, ...readUiParams() });
+  collider?.attach(solver);
   posAttr = bagData.geometry.attributes.position;
   bagMesh.geometry = bagData.geometry;
   wireMesh.geometry = bagData.geometry;
@@ -796,6 +799,7 @@ const appearance = setupAppearance({
   hemiLight, keyLight, rimLight, windArrowGroup,
 });
 setupMaterials(appearance);
+collider = setupCollider({ scene, floorY: SOLVER_FIXED.floorY, getSolver: () => solver });
 buildObject('bag', 'low');
 
 // 6. Animation Loop

@@ -192,6 +192,10 @@ export class XPBDBagSolver {
 
     // Temporary external sculpt/gust forces (used for reference pose warm-up or air gusts)
     this.extForces = new Float32Array(N * 3);
+
+    // Optional solid obstacle: { type: 'sphere' | 'table' | 'cylinder', x, z, size, height, friction }
+    // size = diameter / width (m), height = top above the floor (m)
+    this.collider = null;
   }
 
   _computeDihedralAngle(p, i0, i1, i2, i3) {
@@ -722,6 +726,9 @@ export class XPBDBagSolver {
         }
       }
 
+      // 4b. Obstacle
+      if (this.collider) this._solveCollider();
+
       // 5. Self-Collision (run once per frame on last substep to prevent CPU spikes/stuttering)
       if (this.params.selfCollision && step === substeps - 1) {
         this._solveSelfCollision();
@@ -782,6 +789,71 @@ export class XPBDBagSolver {
           this.bendRestAngle[h] = nextRest;
         }
       }
+    }
+  }
+
+  setCollider(c) {
+    this.collider = c && c.type && c.type !== 'none' ? { ...c } : null;
+  }
+
+  /**
+   * Pushes free vertices out of the obstacle (plus a small margin for the film thickness) along the
+   * shortest way out, and applies friction to the motion along its surface.
+   */
+  _solveCollider() {
+    const c = this.collider;
+    const margin = 0.006;
+    const fy = this.params.floorY;
+    const fr = Math.max(0, Math.min(1, c.friction ?? 0.5));
+    const half = c.size / 2;
+    const top = fy + c.height + margin;
+    const R = half + margin;
+    // Sphere centre: its top is at `height`
+    const scy = fy + c.height - half;
+    const p = this.pos;
+    for (let i = 0; i < this.numVerts; i++) {
+      if (this.pinned[i]) continue;
+      const ix = 3 * i;
+      const dx = p[ix] - c.x, dy = p[ix + 1] - (c.type === 'sphere' ? scy : 0), dz = p[ix + 2] - c.z;
+      let nx = 0, ny = 0, nz = 0;
+      let tx, ty, tz; // corrected position
+      if (c.type === 'sphere') {
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 >= R * R) continue;
+        const d = Math.sqrt(d2);
+        if (d < 1e-9) { nx = 0; ny = 1; nz = 0; } else { nx = dx / d; ny = dy / d; nz = dz / d; }
+        tx = c.x + nx * R; ty = scy + ny * R; tz = c.z + nz * R;
+      } else {
+        const y = p[ix + 1];
+        if (y >= top) continue;
+        const penTop = top - y;
+        if (c.type === 'table') {
+          const ax = Math.abs(dx), az = Math.abs(dz);
+          if (ax >= R || az >= R) continue;
+          const penX = R - ax, penZ = R - az;
+          tx = p[ix]; ty = y; tz = p[ix + 2];
+          if (penTop <= penX && penTop <= penZ) { ty = top; ny = 1; }
+          else if (penX <= penZ) { nx = Math.sign(dx) || 1; tx = c.x + nx * R; }
+          else { nz = Math.sign(dz) || 1; tz = c.z + nz * R; }
+        } else {
+          // cylinder (vertical axis)
+          const r = Math.sqrt(dx * dx + dz * dz);
+          if (r >= R) continue;
+          const penSide = R - r;
+          tx = p[ix]; ty = y; tz = p[ix + 2];
+          if (penTop <= penSide) { ty = top; ny = 1; }
+          else {
+            if (r < 1e-9) { nx = 1; nz = 0; } else { nx = dx / r; nz = dz / r; }
+            tx = c.x + nx * R; tz = c.z + nz * R;
+          }
+        }
+      }
+      // Friction: remove part of this substep's sliding along the surface
+      const mx = tx - this.prevPos[ix], my = ty - this.prevPos[ix + 1], mz = tz - this.prevPos[ix + 2];
+      const mn = mx * nx + my * ny + mz * nz;
+      p[ix] = tx - (mx - mn * nx) * fr;
+      p[ix + 1] = ty - (my - mn * ny) * fr;
+      p[ix + 2] = tz - (mz - mn * nz) * fr;
     }
   }
 
