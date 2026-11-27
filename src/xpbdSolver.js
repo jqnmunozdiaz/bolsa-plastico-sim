@@ -1008,6 +1008,27 @@ export class XPBDBagSolver {
       p[ix + 1] = fyy;
       p[ix + 2] = fz;
     }
+
+    // Edge midpoints: a thin piece (bottle neck, bicycle tube, chair leg) could otherwise slip
+    // between two vertices and pierce the film. If the midpoint is inside, move the edge out.
+    for (let e = 0; e < this.numStretch; e++) {
+      const a = this.stretchA[e], b = this.stretchB[e];
+      const fa = !this.pinned[a], fb = !this.pinned[b];
+      if (!fa && !fb) continue;
+      const mx = (p[3 * a] + p[3 * b]) * 0.5, my = (p[3 * a + 1] + p[3 * b + 1]) * 0.5, mz = (p[3 * a + 2] + p[3 * b + 2]) * 0.5;
+      toLocal(mx, my, mz);
+      if (L[0] < c.min[0] - m || L[0] > c.max[0] + m || L[1] < c.min[1] - m || L[1] > c.max[1] + m ||
+          L[2] < c.min[2] - m || L[2] > c.max[2] + m) continue;
+      if (!this._pushOutLocal(L, Nn, m)) continue;
+      const wx0 = L[0] * s, wz0 = L[2] * s;
+      const dx = c.x + wx0 * cs + wz0 * sn - mx;
+      const dy = fy + L[1] * s - my;
+      const dz = c.z - wx0 * sn + wz0 * cs - mz;
+      // Shift so the midpoint lands on the surface (a fixed end stays: the free end moves twice as far)
+      const ka = fa ? (fb ? 1 : 2) : 0, kb = fb ? (fa ? 1 : 2) : 0;
+      p[3 * a] += dx * ka; p[3 * a + 1] += dy * ka; p[3 * a + 2] += dz * ka;
+      p[3 * b] += dx * kb; p[3 * b + 1] += dy * kb; p[3 * b + 2] += dz * kb;
+    }
   }
 
   /**

@@ -1198,11 +1198,15 @@ if (sharedMatch) {
 }
 
 // 6. Animation Loop
-window.addEventListener('resize', () => {
+/** Portrait screens (phones): zoom out so the whole object fits across the narrow width. */
+function fitCamera() {
   camera.aspect = window.innerWidth / window.innerHeight;
+  camera.zoom = Math.min(1, camera.aspect * 1.25);
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-});
+}
+window.addEventListener('resize', fitCamera);
+fitCamera();
 
 const PHYS_DT = 1 / 60;
 const STEP_BUDGET_MS = 16; // physics time per screen refresh (one 60 Hz frame) before the rest of a step waits

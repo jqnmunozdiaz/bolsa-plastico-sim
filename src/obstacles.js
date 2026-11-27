@@ -120,7 +120,7 @@ export const OBSTACLES = {
   sphere: { label: 'Esfera', scale: 1, parts: [{ type: 'sphere', c: [0, 0.15, 0], r: 0.15 }] },
   block: { label: 'Bloque', scale: 1, parts: [{ type: 'box', c: [0, 0.15, 0], h: [0.175, 0.15, 0.175] }] },
   cylinder: { label: 'Cilindro', scale: 1, parts: [{ type: 'cyl', c: [0, 0], y0: 0, y1: 0.35, r: 0.125 }] },
-  table: { label: 'Mesa', scale: 0.5, parts: table() },
+  table: { label: 'Mesa', scale: 0.4, parts: table() }, // 48 x 32 cm top: the 70 x 50 cm sheet overhangs ~11 cm
   chair: { label: 'Silla', scale: 0.6, parts: chair() },
   printer: { label: 'Impresora 3D', scale: 0.8, parts: printer3d() },
   bicycle: { label: 'Bicicleta', scale: 0.45, parts: bicycle() },
