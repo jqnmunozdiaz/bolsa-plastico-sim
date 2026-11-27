@@ -448,7 +448,7 @@
             <div class="ctl-head"><label for="sliderViscosity">Viscosidad</label></div>
             <input type="range" id="sliderViscosity" min="0" max="20" step="0.1" value="1.7" data-unit="1/s" />
           </div>
-          <div class="ctl" data-info="Precisión de la física. <b>Rápida</b> = 5 subpasos por fotograma (tela algo más elástica, va más fluido en mallas altas); <b>Normal</b> = 7; <b>Alta</b> = 10 subpasos y una pasada extra de estiramiento (tela más firme y estable, pero unas 2–2,5 veces más lenta).">
+          <div class="ctl" data-info="Precisión de la física. <b>Rápida</b> = 5 subpasos por fotograma y control de cruces una vez por fotograma (va más fluido, pero la tela se cruza más al arrugarla); <b>Normal</b> = 7 subpasos, control de cruces cada 3; <b>Alta</b> = 10 subpasos, una pasada extra de estiramiento y control de cruces en cada subpaso (casi sin cruces, pero unas 2–3 veces más lenta).">
             <div class="ctl-head"><span class="ctl-name">Calidad de la simulación</span></div>
             <div class="seg" id="qualitySeg">
               <button type="button" data-quality="fast">Rápida</button>
@@ -456,7 +456,7 @@
               <button type="button" data-quality="high">Alta</button>
             </div>
           </div>
-          <div class="ctl ctl-check" data-info="Impide que el plástico se atraviese a sí mismo al arrugarse. Desactivarla acelera la simulación, pero el STL puede tener caras cruzadas.">
+          <div class="ctl ctl-check" data-info="Impide que la tela se atraviese a sí misma al arrugarse: los puntos se mantienen separados y, además, ningún punto puede cruzar un triángulo de otra parte de la tela (comprobación que se hace más o menos a menudo según la <b>Calidad</b>). Desactivarla acelera bastante la simulación, pero la tela se cruza consigo misma.">
             <div class="ctl-head"><label for="chkSelfCol">Autocolisión</label><input type="checkbox" id="chkSelfCol" checked /></div>
           </div>
           <div class="ctl ctl-check" data-info="Dibuja los triángulos de la malla física sobre la bolsa; útil para comparar resoluciones.">

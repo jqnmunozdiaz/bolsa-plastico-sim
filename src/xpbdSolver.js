@@ -775,6 +775,10 @@ export class XPBDBagSolver {
     // 4b. Obstacle
     if (this.collider) this._solveCollider();
 
+    // 4c. Film against film: vertices may not pass through triangles (every few substeps)
+    const ptEvery = this.ptEvery ?? 3;
+    if (this.params.selfCollision && (step % ptEvery === ptEvery - 1 || step === substeps - 1)) this._solvePointTriangle();
+
     // 5. Self-Collision (run once per frame on last substep to prevent CPU spikes/stuttering)
     if (this.params.selfCollision && step === substeps - 1) {
       this._solveSelfCollision();
@@ -1039,6 +1043,8 @@ export class XPBDBagSolver {
     const substeps = { fast: 5, normal: 7, high: 10 }[q] ?? 7;
     this.params.substeps = substeps;
     this.stretchIters = this.baseStretchIters + (q === 'high' ? 1 : 0);
+    // Film-film (point-triangle) check: once per frame, every 3rd substep, or every substep
+    this.ptEvery = { fast: substeps, normal: 3, high: 1 }[q] ?? 3;
   }
 
   /**
@@ -1173,6 +1179,119 @@ export class XPBDBagSolver {
       if (w1 > 0) { p[3 * i1] += w1 * dLambda * q1x; p[3 * i1 + 1] += w1 * dLambda * q1y; p[3 * i1 + 2] += w1 * dLambda * q1z; }
       if (w2 > 0) { p[3 * i2] += w2 * dLambda * q2x; p[3 * i2 + 1] += w2 * dLambda * q2y; p[3 * i2 + 2] += w2 * dLambda * q2z; }
       if (w3 > 0) { p[3 * i3] += w3 * dLambda * q3x; p[3 * i3 + 1] += w3 * dLambda * q3y; p[3 * i3 + 2] += w3 * dLambda * q3z; }
+    }
+  }
+
+  /**
+   * Point-triangle self-collision. Every vertex is checked against the nearby triangles
+   * (spatial hash of their bounding boxes). It keeps the side of each triangle it was on at the
+   * start of the substep, at least `h` away; if it got closer or crossed, vertex and triangle are
+   * pushed apart (weighted by mass and barycentric coordinates). Prevents the film from passing
+   * through itself between vertices, which the vertex-vertex check alone cannot catch.
+   */
+  _solvePointTriangle() {
+    const h = 0.005; // minimum film-film distance (m)
+    const p = this.pos, q = this.prevPos, I = this.indices, T = this.numTris, N = this.numVerts;
+    const cell = Math.max(0.012, (this.ptCell ?? 2) * this.meanEdge);
+    const inv = 1 / cell;
+    const HS = this.hashSize;
+    if (!this._ptCount) {
+      this._ptCount = new Int32Array(HS + 1);
+      this._ptEntries = new Int32Array(8 * T);
+      this._ptTriBox = new Float32Array(6 * T);
+      this._ptMark = new Int32Array(N).fill(-1);
+    }
+    const count = this._ptCount, box = this._ptTriBox, mark = this._ptMark;
+    let entries = this._ptEntries;
+    const hashCell = (x, y, z) => {
+      const k = (x * 92837111) ^ (y * 689287499) ^ (z * 283923481);
+      return ((k % HS) + HS) % HS;
+    };
+    // 1. Triangle boxes (now and at the start of the substep, grown by h) -> hash cells
+    count.fill(0);
+    let total = 0;
+    for (let t = 0; t < T; t++) {
+      const a = 3 * I[3 * t], b = 3 * I[3 * t + 1], c = 3 * I[3 * t + 2];
+      for (let k = 0; k < 3; k++) {
+        box[6 * t + k] = Math.min(p[a + k], p[b + k], p[c + k], q[a + k], q[b + k], q[c + k]) - h;
+        box[6 * t + 3 + k] = Math.max(p[a + k], p[b + k], p[c + k], q[a + k], q[b + k], q[c + k]) + h;
+      }
+      const x0 = Math.floor(box[6 * t] * inv), x1 = Math.floor(box[6 * t + 3] * inv);
+      const y0 = Math.floor(box[6 * t + 1] * inv), y1 = Math.floor(box[6 * t + 4] * inv);
+      const z0 = Math.floor(box[6 * t + 2] * inv), z1 = Math.floor(box[6 * t + 5] * inv);
+      for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) {
+        count[hashCell(x, y, z)]++;
+        total++;
+      }
+    }
+    if (entries.length < total) entries = this._ptEntries = new Int32Array(Math.ceil(total * 1.5));
+    let sum = 0;
+    for (let k = 0; k < HS; k++) { sum += count[k]; count[k] = sum; }
+    count[HS] = sum;
+    for (let t = 0; t < T; t++) {
+      const x0 = Math.floor(box[6 * t] * inv), x1 = Math.floor(box[6 * t + 3] * inv);
+      const y0 = Math.floor(box[6 * t + 1] * inv), y1 = Math.floor(box[6 * t + 4] * inv);
+      const z0 = Math.floor(box[6 * t + 2] * inv), z1 = Math.floor(box[6 * t + 5] * inv);
+      for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) {
+        entries[--count[hashCell(x, y, z)]] = t;
+      }
+    }
+    // 2. Each vertex against the triangles in its cell
+    for (let i = 0; i < N; i++) {
+      const wi = this.invMass[i];
+      const ix = 3 * i;
+      const px = p[ix], py = p[ix + 1], pz = p[ix + 2];
+      const hc = hashCell(Math.floor(px * inv), Math.floor(py * inv), Math.floor(pz * inv));
+      const e0 = count[hc], e1 = count[hc + 1];
+      if (e0 === e1) continue;
+      // Neighbours (2-ring) never collide with the vertex: they are the same piece of film
+      for (let e = this.exclStart[i]; e < this.exclStart[i + 1]; e++) mark[this.exclIdx[e]] = i;
+      for (let e = e0; e < e1; e++) {
+        const t = entries[e];
+        const o = 6 * t;
+        if (px < box[o] || px > box[o + 3] || py < box[o + 1] || py > box[o + 4] || pz < box[o + 2] || pz > box[o + 5]) continue;
+        const ia = I[3 * t], ib = I[3 * t + 1], ic = I[3 * t + 2];
+        if (mark[ia] === i || mark[ib] === i || mark[ic] === i) continue;
+        const wa = this.invMass[ia], wb = this.invMass[ib], wc = this.invMass[ic];
+        if (wi + wa + wb + wc === 0) continue;
+        const a = 3 * ia, b = 3 * ib, c = 3 * ic;
+        // Triangle normal now
+        const e1x = p[b] - p[a], e1y = p[b + 1] - p[a + 1], e1z = p[b + 2] - p[a + 2];
+        const e2x = p[c] - p[a], e2y = p[c + 1] - p[a + 1], e2z = p[c + 2] - p[a + 2];
+        let nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+        const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (nl < 1e-12) continue;
+        nx /= nl; ny /= nl; nz /= nl;
+        const rx = px - p[a], ry = py - p[a + 1], rz = pz - p[a + 2];
+        const d = rx * nx + ry * ny + rz * nz;
+        if (d > h || d < -2 * h) continue; // too far from the plane to matter
+        // Barycentric coordinates of the projection (must fall inside the triangle)
+        const d00 = e1x * e1x + e1y * e1y + e1z * e1z, d01 = e1x * e2x + e1y * e2y + e1z * e2z;
+        const d11 = e2x * e2x + e2y * e2y + e2z * e2z;
+        const d20 = rx * e1x + ry * e1y + rz * e1z, d21 = rx * e2x + ry * e2y + rz * e2z;
+        const den = d00 * d11 - d01 * d01;
+        if (den < 1e-16) continue;
+        const v = (d11 * d20 - d01 * d21) / den, w = (d00 * d21 - d01 * d20) / den, u = 1 - v - w;
+        if (u < 0 || v < 0 || w < 0) continue;
+        // Which side was the vertex on at the start of the substep?
+        const f1x = q[b] - q[a], f1y = q[b + 1] - q[a + 1], f1z = q[b + 2] - q[a + 2];
+        const f2x = q[c] - q[a], f2y = q[c + 1] - q[a + 1], f2z = q[c + 2] - q[a + 2];
+        const mx = f1y * f2z - f1z * f2y, my = f1z * f2x - f1x * f2z, mz = f1x * f2y - f1y * f2x;
+        const side0 = (q[ix] - q[a]) * mx + (q[ix + 1] - q[a + 1]) * my + (q[ix + 2] - q[a + 2]) * mz;
+        const sgn = side0 >= 0 ? 1 : -1;
+        const C = d * sgn - h; // < 0: too close, or crossed during this substep
+        if (C >= 0 || C < -2 * h) continue; // fine, or deep behind (an old crossing: leave it)
+        const W = wi + wa * u * u + wb * v * v + wc * w * w;
+        // Never move anything more than h in one correction (large jumps add energy)
+        let lam = C / W;
+        const maxW = Math.max(wi, wa * u, wb * v, wc * w);
+        if (-lam * maxW > h) lam = -h / maxW;
+        const sx = sgn * nx * lam, sy = sgn * ny * lam, sz = sgn * nz * lam;
+        p[ix] -= wi * sx; p[ix + 1] -= wi * sy; p[ix + 2] -= wi * sz;
+        p[a] += wa * u * sx; p[a + 1] += wa * u * sy; p[a + 2] += wa * u * sz;
+        p[b] += wb * v * sx; p[b + 1] += wb * v * sy; p[b + 2] += wb * v * sz;
+        p[c] += wc * w * sx; p[c + 1] += wc * w * sy; p[c + 2] += wc * w * sz;
+      }
     }
   }
 
